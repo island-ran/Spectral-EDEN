@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: swarm_data
+Description: Description of swarm_data
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

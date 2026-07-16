@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/devel
+
+Name: explore_con
+Description: Description of explore_con
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

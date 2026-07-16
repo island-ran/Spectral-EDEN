@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: map_visualization
+Description: Description of map_visualization
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib -lmap_visualization
+Requires: roscpp tf visualization_msgs pcl_conversions pcl_ros sensor_msgs geometry_msgs kdtree glog_catkin gflags_catkin

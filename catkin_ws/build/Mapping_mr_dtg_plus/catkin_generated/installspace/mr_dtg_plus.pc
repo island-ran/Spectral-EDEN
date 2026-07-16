@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: mr_dtg_plus
+Description: Description of mr_dtg_plus
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib -lmr_dtg_plus
+Requires: roscpp visualization_msgs sensor_msgs geometry_msgs std_msgs block_map_lite lowres_map_lite eroi swarm_data

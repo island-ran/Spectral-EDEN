@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/devel
+
+Name: map_render
+Description: Description of map_render
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib -lmap_render
+Requires: roscpp std_msgs pointcloud_render mesh_render

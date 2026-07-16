@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/devel
+
+Name: kdtree
+Description: Description of kdtree
+Version: 0.0.0
+Cflags: -I/home/island/EDEN/catkin_ws/src/Tools_kdtree/include
+Libs: -L${prefix}/lib -lkdtree
+Requires: 

@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: gflags_catkin
+Description: Description of gflags_catkin
+Version: 2.2.1
+Cflags: 
+Libs: -L${prefix}/lib /usr/lib/x86_64-linux-gnu/libgflags.so.2.2.2
+Requires: 

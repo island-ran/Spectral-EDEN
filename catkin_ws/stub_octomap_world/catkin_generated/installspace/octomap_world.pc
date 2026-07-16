@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: octomap_world
+Description: Description of octomap_world
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib -loctomap_world
+Requires: roscpp

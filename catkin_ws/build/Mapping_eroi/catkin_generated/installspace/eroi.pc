@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: eroi
+Description: Description of eroi
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib -leroi
+Requires: roscpp tf visualization_msgs pcl_conversions pcl_ros block_map_lite lowres_map_lite cv_bridge sensor_msgs nav_msgs geometry_msgs swarm_data

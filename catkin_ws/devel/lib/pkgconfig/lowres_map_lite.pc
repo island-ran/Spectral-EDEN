@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/devel
+
+Name: lowres_map_lite
+Description: Description of lowres_map_lite
+Version: 0.0.0
+Cflags: -I/home/island/EDEN/catkin_ws/src/Mapping_lowres_map_lite/include
+Libs: -L${prefix}/lib -llowres_map_lite
+Requires: roscpp tf visualization_msgs pcl_conversions pcl_ros sensor_msgs geometry_msgs block_map_lite glog_catkin gflags_catkin

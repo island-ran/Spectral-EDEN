@@ -1,0 +1,2 @@
+catkin_simple:gflags_catkin:glog_catkin
+-DUSE_SYSTEM_GFLAGS=ON -DUSE_SYSTEM_GLOG=ON -DCATKIN_DEVEL_PREFIX=/home/island/EDEN/catkin_deps_ws/devel -DCMAKE_INSTALL_PREFIX=/home/island/EDEN/catkin_deps_ws/install -G Unix Makefiles

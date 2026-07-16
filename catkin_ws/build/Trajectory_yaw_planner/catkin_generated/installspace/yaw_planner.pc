@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: yaw_planner
+Description: Description of yaw_planner
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib -lyaw_planner
+Requires: roscpp visualization_msgs sensor_msgs nav_msgs swarm_exp_msgs geometry_msgs

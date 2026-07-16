@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/devel
+
+Name: block_map_lite
+Description: Description of block_map_lite
+Version: 0.0.0
+Cflags: -I/home/island/EDEN/catkin_ws/src/Mapping_block_map_lite/include
+Libs: -L${prefix}/lib -lblock_map_lite_raycast -lblock_map_lite_grid -lblock_map_lite_color
+Requires: roscpp tf visualization_msgs pcl_conversions pcl_ros cv_bridge sensor_msgs nav_msgs geometry_msgs swarm_data

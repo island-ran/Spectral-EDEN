@@ -1,0 +1,8 @@
+prefix=/home/island/EDEN/catkin_ws/install
+
+Name: swarm_data
+Description: Description of swarm_data
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib -lswarm_data
+Requires: roscpp visualization_msgs sensor_msgs geometry_msgs nav_msgs gcopter swarm_exp_msgs exp_comm_msgs data_statistics
