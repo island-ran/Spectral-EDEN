@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/install
-
-Name: ato_test
-Description: Description of ato_test
-Version: 0.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: mr_dtg_plus block_map_lite geometry_msgs trajectory_msgs gflags_catkin visualization_msgs gazebo_msgs glog_catkin gcopter gcopter_debug yaw_planner lowres_map_lite

@@ -1,7 +1,0 @@
-<?xml version="1.0"?>
-<package format="2">
-  <name>vikit_ros</name><version>0.0.0</version>
-  <description>Stub</description><maintainer email="a@b.com">a</maintainer><license>BSD</license>
-  <buildtool_depend>catkin</buildtool_depend>
-  <build_depend>roscpp</build_depend><exec_depend>roscpp</exec_depend>
-</package>

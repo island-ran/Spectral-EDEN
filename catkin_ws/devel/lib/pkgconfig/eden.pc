@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/devel
-
-Name: eden
-Description: Description of eden
-Version: 0.0.0
-Cflags: -I/home/island/EDEN/catkin_ws/src/Exploration_eden/include
-Libs: -L${prefix}/lib -leden_lib
-Requires: mr_dtg_plus block_map_lite lowres_map_lite geometry_msgs trajectory_msgs gflags_catkin visualization_msgs glog_catkin gcopter eroi

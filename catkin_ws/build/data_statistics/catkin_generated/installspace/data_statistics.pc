@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/install
-
-Name: data_statistics
-Description: Description of data_statistics
-Version: 0.0.0
-Cflags: -I${prefix}/include
-Libs: -L${prefix}/lib -lcomputation_statistician
-Requires: roscpp tf std_msgs nav_msgs sensor_msgs

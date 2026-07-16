@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/devel
-
-Name: pose_utils
-Description: Description of pose_utils
-Version: 0.0.0
-Cflags: -I/home/island/EDEN/catkin_ws/src/utils_pose_utils/include
-Libs: -L${prefix}/lib -lpose_utils
-Requires: 

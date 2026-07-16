@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/devel
-
-Name: svo_msgs
-Description: Description of svo_msgs
-Version: 0.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 

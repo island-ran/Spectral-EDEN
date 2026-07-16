@@ -1,2 +1,0 @@
-set(swarm_exp_msgs_MESSAGE_FILES "msg/SwarmTraj.msg;msg/LocalTraj.msg;msg/DtgFFEdge.msg;msg/DtgHFEdge.msg;msg/DtgHHEdge.msg;msg/DtgHNode.msg;msg/DtgFNode.msg;msg/DtgBag.msg;msg/IdOdom.msg;msg/IdPose.msg;msg/GroupCommandReq.msg;msg/GroupCommandRes.msg;msg/GroupHelperReq.msg;msg/GroupHelperRes.msg;msg/GroupMap.msg;msg/GroupMemberState.msg;msg/GroupState.msg;msg/GroupRoutingReq.msg;msg/GroupRoutingRes.msg")
-set(swarm_exp_msgs_SERVICE_FILES "")

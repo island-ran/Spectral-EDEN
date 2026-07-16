@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/install
-
-Name: gcopter_debug
-Description: Description of gcopter_debug
-Version: 0.1.0
-Cflags: -I${prefix}/include
-Libs: -L${prefix}/lib -ltraj_opt_debug
-Requires: 

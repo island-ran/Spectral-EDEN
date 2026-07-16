@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/devel
-
-Name: traj_exc
-Description: Description of traj_exc
-Version: 0.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: roscpp visualization_msgs sensor_msgs geometry_msgs gcopter yaw_planner gflags_catkin glog_catkin quadrotor_msgs

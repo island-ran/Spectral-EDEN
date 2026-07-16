@@ -1,8 +1,0 @@
-prefix=/home/island/EDEN/catkin_ws/install
-
-Name: gcopter
-Description: Description of gcopter
-Version: 0.1.0
-Cflags: -I${prefix}/include
-Libs: -L${prefix}/lib -ltraj_opt
-Requires: 

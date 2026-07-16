@@ -1,1 +1,0 @@
-/usr/bin/cc -fPIC -shared -Wl,-soname,libkdtree.so -o /home/island/EDEN/catkin_ws/devel/lib/libkdtree.so CMakeFiles/kdtree.dir/src/kdtree.c.o 
