@@ -405,8 +405,10 @@ EdenPlanStatus SingleExp::EdenPlan(){
                 volume_covered = CS_.GetVolume(0) / total_explorable_volume_ >=
                     volume_coverage_threshold_;
             }
-            const bool finish_candidate = sensor_fresh && low_total_gain &&
-                ((no_effective_frontier && no_pending_region) || volume_covered);
+            // volume_covered is a hard override: terminate regardless of gain/sensor
+            const bool finish_candidate = volume_covered ||
+                (sensor_fresh && low_total_gain &&
+                 (no_effective_frontier && no_pending_region));
             const uint64_t frontier_epoch = DTG_.frontier_epoch();
 
             if(finish_candidate){
@@ -446,7 +448,17 @@ EdenPlanStatus SingleExp::EdenPlan(){
         return EdenPlanStatus::GLOBAL_PLAN_FAILED;
     }
     ResetFinishConfirmation();
-    
+
+    // Hard override: terminate immediately when volume coverage reached
+    if(volume_coverage_enabled_ && stat_ && total_explorable_volume_ > 0.0){
+        if(CS_.GetVolume(0) / total_explorable_volume_ >= volume_coverage_threshold_){
+            ROS_WARN("Exploration complete - volume coverage reached (volume=%.1f/%.0f=%.1f%%)",
+                CS_.GetVolume(0), total_explorable_volume_,
+                CS_.GetVolume(0)/total_explorable_volume_*100.0);
+            ros::shutdown();
+        }
+    }
+
     cout<<"plan_res:"<<int(plan_res)<<endl;
     cout<<"ps_y:"<<ps_y.transpose()<<endl;
     cout<<"p_:"<<p_.transpose()<<" "<<yaw_<<endl;

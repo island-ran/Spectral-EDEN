@@ -17,3 +17,7 @@ CMakeFiles/
 .vscode/
 .idea/
 *.bag
+
+# 运行生成的数据和地图
+/data/
+/map/
