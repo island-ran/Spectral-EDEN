@@ -1,0 +1,30 @@
+map_config:
+  map_file: "multi_storage_garage.pcd"
+  map_dimension: 2
+
+  init_x: 0.0
+  init_y: 0.0
+  init_z: 0.5
+  init_yaw: 0.0
+
+  map_size:
+    map_min_x: -45.0
+    map_min_y: -30.0
+    map_min_z: -2.0
+    map_max_x: 90.0
+    map_max_y: 120.0
+    map_max_z: 22.0
+
+    box_min_x: -41.0
+    box_min_y: -26.0
+    box_min_z: 0.0
+    box_max_x: 88.0
+    box_max_y: 118.0
+    box_max_z: 21.0
+
+    vbox_min_x: -42.0
+    vbox_min_y: -28.0
+    vbox_min_z: -1.0
+    vbox_max_x: 89.0
+    vbox_max_y: 119.0
+    vbox_max_z: 5.0

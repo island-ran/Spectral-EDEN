@@ -1,0 +1,30 @@
+map_config:
+  map_file: "indoor_corridors.pcd"
+  map_dimension: 2
+
+  init_x: 0.0
+  init_y: 0.0
+  init_z: 0.5
+  init_yaw: 0.0
+
+  map_size:
+    map_min_x: -5.0
+    map_min_y: -35.0
+    map_min_z: -1.0
+    map_max_x: 130.0
+    map_max_y: 75.0
+    map_max_z: 5.0
+
+    box_min_x: -2.0
+    box_min_y: -30.0
+    box_min_z: 0.0
+    box_max_x: 128.0
+    box_max_y: 71.0
+    box_max_z: 3.5
+
+    vbox_min_x: -3.0
+    vbox_min_y: -32.0
+    vbox_min_z: -1.0
+    vbox_max_x: 129.0
+    vbox_max_y: 73.0
+    vbox_max_z: 2.5

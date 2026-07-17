@@ -21,3 +21,11 @@ CMakeFiles/
 # 运行生成的数据和地图
 /data/
 /map/
+data/
+map/
+images/
+
+# 大型仿真地图和点云文件
+/eden_src/autonomous_exploration_environments/campus/meshes/campus.dae
+/eden_src/autonomous_exploration_environments/garage/preview/pointcloud.ply
+**/pointcloud.ply

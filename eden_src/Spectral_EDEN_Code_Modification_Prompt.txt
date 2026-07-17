@@ -1,0 +1,554 @@
+================================================================================
+  Spectral-EDEN 代码修改提示词 —— 供大模型执行 C++/ROS 代码修改
+================================================================================
+
+【角色设定】
+你是一名精通 C++、Eigen、ROS、谱图理论的无人机自主探索算法工程师。
+你需要在 EDEN 探索框架 (https://github.com...) 的基础上，将全局路由模块从
+EOHDT (Prim MST + DFS walk) 替换为基于谱图理论的 Spectral Sequencing 方法。
+
+================================================================================
+第一部分：当前方法核心内容
+================================================================================
+
+我们的方法称为 Spectral-EDEN，核心理念是：
+  用图拉普拉斯矩阵的 Fiedler 向量（第二特征向量）指导边界区域的探索顺序，
+  从根本上消除 EDEN 论文自述的"反复横跳"（BFMs）缺陷。
+
+EDEN 的基础概念回顾（对理解代码至关重要）：
+  - H-node（历史节点）：拓扑图的结构节点，记录已遍历的关键位置
+  - F-node（前沿节点）：边界区域的视点簇，连接已知与未知空间
+  - 边界区域（Boundary Region）：一个 H-node + 其通过 hf_edge 连接的所有 EROI
+  - h_dist_map_：全局距离哈希缓存，key=(min(h1,h2)*10000000+max(h1,h2))，value=(距离, 路径)
+  - TspApproxiPlan：EDEN 原全局路由函数，流程为：
+      获取局部 H 节点 → ParallelDijkstra 找活跃边界区域 →
+      构建距离矩阵 dist_mat（查表 h_dist_map_）→ Prim MST →
+      找最远叶节点 → 启发式 DFS walk 生成 route_h
+
+五个阶段的完整描述：
+
+----------------------------------------------------------------------
+阶段 1：边界区域相似性图构建
+----------------------------------------------------------------------
+在每次全局重规划时，利用 EDEN 已有的 h_dist_map_ 构建加权相似性图 G=(V,E,W)：
+  - 节点 V：当前活跃的边界区域集合 tarhs（与 EDEN 原 ParallelDijkstra 输出相同）
+  - 边 E：若两边界区域之间有已知路径（即在 h_dist_map_ 中存在），则存在边
+  - 边权 w_ij = exp(-d_ij / sigma)，其中：
+      d_ij = h_dist_map_ 中查询到的路径长度（米）
+      sigma = 所有 d_ij 的中位数（自适应尺度归一化）
+  - 度 d_i = sum_j(w_ij)，度矩阵 D = diag(d_1, ..., d_n)
+  - 拉普拉斯矩阵 L = D - W（未归一化）
+  - 归一化拉普拉斯 L_norm = D^(-1/2) * L * D^(-1/2)
+
+物理含义：w_ij 衡量"以飞行代价度量的拓扑邻近性"。
+  d_ij 小 → w_ij 接近 1 → 两区域高度耦合，属于同一自然子区
+  d_ij 大 → w_ij 接近 0 → 两区域拓扑疏远
+
+----------------------------------------------------------------------
+阶段 2：Fiedler 向量提取 + 谱序重排（替换 EOHDT）
+----------------------------------------------------------------------
+求解广义特征值问题 L * f = lambda * D * f 的第二小特征值 lambda_2 及其对应
+的特征向量 f^(2)（Fiedler 向量）。
+
+等价于对归一化拉普拉斯 L_norm = D^(-1/2) * L * D^(-1/2) 做标准特征分解，
+取第二小特征值和特征向量。
+
+使用 LOBPCG (Locally Optimal Block Preconditioned Conjugate Gradient) 算法
+求解，只需 2-3 个特征对，时间复杂度 O(n)，满足 EDEN 的实时性要求。
+
+得到 Fiedler 向量 f^(2) = (f_1, f_2, ..., f_n) 后，
+按 f_i 值的升序排列边界区域，生成探索序列 route_h：
+  - f_i 最小（最负）的边界区域 → 序列最前（先探索）
+  - f_i 最大（最正）的边界区域 → 序列最后（后探索）
+
+"最远叶节点最后"优化（保留 EOHDT 此项优点）：
+  若 f_i 绝对值最大的边界区域位于序列末尾 → 验证其是否为当前已知图中
+  距离最远的区域，若是则保持其在末尾位置不变。
+
+与 EOHDT 的对比：
+  EOHDT：距离矩阵 → Prim MST → 最远叶节点 → DFS walk → (n-1) 条树边
+  我们：  距离矩阵 → 相似性矩阵 → Fiedler 向量 → 排序 → n 个节点的谱嵌入
+  MST 将全图信息压缩为树结构，丢失聚类信息；
+  谱嵌入保留全图的流形结构，Fiedler 向量差最大的邻接边即是最窄瓶颈。
+
+----------------------------------------------------------------------
+阶段 3：增量谱更新（LOBPCG 热启动）
+----------------------------------------------------------------------
+当 DTG 增量增长（新 H-node/F-node 出现）时：
+  - 新节点的 Fiedler 值 f_new 初始化为最近邻节点值的加权平均：
+      f_new = (1 / sum(w_new,j)) * sum_j(w_new,j * f_j)
+    其中 j 遍历新节点的所有已存在邻居
+  - 以旧特征向量扩展后作为 LOBPCG 的初始子空间，执行 3-5 次迭代收敛
+  - 热启动使增量更新从冷启动的 ~50 次迭代降至 ~3-5 次，满足 ~1.5ms 预算
+
+----------------------------------------------------------------------
+阶段 4：lambda_2 监控 + 聚类穷尽
+----------------------------------------------------------------------
+维护 lambda_2 的指数滑动平均：
+  lambda_2_bar(t) = alpha * lambda_2_bar(t-1) + (1-alpha) * lambda_2(t)
+  其中 alpha = 0.92
+
+触发条件（同时满足）：
+  1. lambda_2(t) < lambda_2_bar(t) / 2  （谱间隙，标志出现瓶颈）
+  2. n >= 6                          （冷启动阈值，节点不足时不可靠）
+
+触发后：对 Fiedler 向量 f^(2) 的值做 k-means (k=2) 聚类，识别两个自然分区。
+若无人机在当前分区内且该分区前沿已清空 → 切换到另一个分区。
+分区信息存入 missedRegions 栈，支持后续回溯。
+
+不触发时：仅执行阶段 2 的谱序重排，不强制分区。
+
+----------------------------------------------------------------------
+阶段 5：谱一致性嵌入视点评分
+----------------------------------------------------------------------
+在 EDEN 原有的 GetGainExp1 / GetGainExp2 函数中，以极小的权重嵌入
+谱一致性信息作为 tie-breaker。
+
+原始 EDEN 视点评分：
+  GetGainExp1(ps, vp, vs, dist):
+    核心为 exp(-lambda_e * t)，其中
+    t = max(dist / v1_max, |yaw_diff| / yv_max * yaw_gain) + a_cost
+    a_cost = det_theta / omega * acc_gain （曲率惩罚）
+
+新增谱一致性项（嵌入在 exp 内部，而非外部乘法）：
+  t_modified = t + lambda_s * (1 - |f_i^(2)| / max_j|f_j^(2)|) * (dist / v_max)
+  其中 lambda_s = 0.05（极小系数，仅做 tie-breaker）
+
+物理含义：
+  |f_i^(2)| 接近 0 的边界区域位于切割边界（瓶颈），具有"跨区双重角色"；
+  轻微提高其代价以减少跨区诱惑，打破 TSP 在瓶颈处的不确定振荡。
+  |f_i^(2)| 大的区域（深死胡同）代价几乎不变。
+
+================================================================================
+第二部分：需要修改的文件和具体修改内容
+================================================================================
+
+----------------------------------------------------------------------
+文件 1：mr_dtg_plus_structures.h
+路径：EDEN/Mapping/mr_dtg_plus/include/mr_dtg_plus/mr_dtg_plus_structures.h
+----------------------------------------------------------------------
+
+修改内容：在原有结构体定义之后，新增谱图计算所需的数据结构：
+
+(1.1) 新增结构体 SpectralGraphData：
+  struct SpectralGraphData {
+    int n;                                    // 当前活跃边界区域数量
+    std::vector<int> h_ids;                   // tarhs 中各 H-node 的 id
+    std::vector<Eigen::Vector3d> positions;   // tarhs 中各 H-node 的 3D 坐标
+    Eigen::MatrixXd W;                        // 相似性矩阵 (n x n)
+    Eigen::MatrixXd D;                        // 度矩阵 (n x n)，对角
+    Eigen::MatrixXd L;                        // 未归一化拉普拉斯 (n x n)
+    Eigen::MatrixXd L_norm;                   // 归一化拉普拉斯 (n x n)
+    Eigen::VectorXd fiedler;                  // Fiedler 向量 f^(2)，长度 n
+    double lambda2;                           // 代数连通度 lambda_2
+    double lambda2_bar;                       // lambda_2 的指数滑动平均
+    int cluster_labels;                       // k-means 聚类标签（0 或 1）
+    bool spectral_valid;                      // 谱计算是否成功
+  };
+
+(1.2) 新增结构体 SpectralConfig（谱方法超参数）：
+  struct SpectralConfig {
+    double alpha = 0.92;          // lambda_2 滑动平均的平滑因子
+    double lambda_s = 0.05;       // 谱一致性在视点评分中的权重
+    int N_min = 6;                // 触发谱切割的最小节点数
+    int lobpcg_max_iter = 50;     // LOBPCG 最大迭代次数（冷启动）
+    int lobpcg_hot_iter = 5;      // LOBPCG 最大迭代次数（热启动）
+    double lobpcg_tol = 1e-4;     // LOBPCG 收敛容差
+  };
+
+----------------------------------------------------------------------
+文件 2：mr_dtg_plus.h
+路径：EDEN/Mapping/mr_dtg_plus/include/mr_dtg_plus/mr_dtg_plus.h
+----------------------------------------------------------------------
+
+修改内容：
+
+(2.1) 在文件头部 #include 区域新增：
+  #include <Eigen/Eigenvalues>    // 用于 SelfAdjointEigenSolver 备用
+
+(2.2) 在类 MultiDtgPlus 的 private 成员变量区域（约第 393 行，TSP 区域）新增：
+  // Spectral-EDEN
+  SpectralGraphData spectral_data_;     // 谱图数据
+  SpectralConfig spectral_config_;      // 谱方法配置
+  bool use_spectral_sequencing_;        // 是否启用谱序重排（默认 true）
+
+(2.3) 在类 MultiDtgPlus 的 public 函数声明区域新增以下函数声明：
+
+  // === 谱图计算函数 ===
+  /**
+   * @brief 构建相似性图 G = (V, E, W)
+   * @param tarhs 活跃边界区域列表
+   * @param paths 各区域的距离信息
+   * @return 构建成功返回 true
+   */
+  bool BuildSpectralGraph(const std::vector<h_ptr> &tarhs,
+                          const std::vector<std::pair<double, std::list<h_ptr>>> &paths);
+
+  /**
+   * @brief 计算归一化拉普拉斯矩阵
+   */
+  void ComputeNormalizedLaplacian();
+
+  /**
+   * @brief LOBPCG 求解第二小特征对 (lambda_2, fiedler)
+   * @param hot_start 是否为热启动
+   */
+  bool ComputeFiedlerVector(bool hot_start = false);
+
+  // === 谱序重排函数（替换 EOHDT 路由） ===
+  /**
+   * @brief 用 Fiedler 向量排序边界区域生成探索序列
+   *        （替代 EOHDT 的 Prim + DFS walk）
+   * @param tarhs 活跃边界区域
+   * @param paths 各区域距离信息
+   * @param s_pos 无人机当前位置
+   * @param route_h 输出：排序后的边界区域序列
+   */
+  void SpectralSequence(const std::vector<h_ptr> &tarhs,
+                        const std::vector<std::pair<double, std::list<h_ptr>>> &paths,
+                        const Eigen::Vector3d &s_pos,
+                        std::vector<h_ptr> &route_h);
+
+  // === lambda_2 监控函数 ===
+  /**
+   * @brief 更新 lambda_2 的指数滑动平均
+   */
+  void UpdateLambda2Bar();
+
+  /**
+   * @brief 检测是否应触发谱聚类分区
+   * @return 应触发返回 true
+   */
+  bool ShouldTriggerPartition();
+
+  /**
+   * @brief 对 Fiedler 向量做 k-means (k=2) 分区
+   * @param labels 输出：每个节点的分区标签 (0 或 1)
+   */
+  void SpectralKMeans(std::vector<int> &labels);
+
+  // === 热启动辅助函数 ===
+  /**
+   * @brief 为新加入的 H-node 初始化 Fiedler 值（最近邻加权平均）
+   * @param new_h 新加入的 H-node
+   * @return 初始化成功返回 true
+   */
+  bool InitFiedlerForNewNode(h_ptr &new_h);
+
+  // === 修改后的视点评分函数 ===
+  /**
+   * @brief 谱一致性增强的单视点评分（在原始 GetGainExp1 基础上增加谱一致性项）
+   * @param ps 无人机当前状态 (x,y,z,yaw)
+   * @param vp 候选视点 (x,y,z,yaw)
+   * @param vs 无人机当前速度
+   * @param dist 到视点的距离
+   * @param fiedler_val 该边界区域对应节点的 Fiedler 值
+   * @return 谱增强的信息增益评分
+   */
+  inline double GetGainExp1Spectral(const Eigen::Vector4d &ps,
+                                     const Eigen::Vector4d &vp,
+                                     const Eigen::Vector3d &vs,
+                                     const double &dist,
+                                     const double &fiedler_val);
+
+  /**
+   * @brief 谱一致性增强的双视点评分（在 GetGainExp2 基础上增加谱一致性项）
+   * @param fiedler_val 该边界区域对应节点的 Fiedler 值
+   */
+  inline double GetGainExp2Spectral(const Eigen::Vector4d &ps,
+                                     const Eigen::Vector4d &vp1,
+                                     const Eigen::Vector3d &vs,
+                                     const double &dist,
+                                     const Eigen::Vector3d &vp2,
+                                     const double &arc,
+                                     const double &vm,
+                                     const double &y2,
+                                     const double &fiedler_val);
+
+----------------------------------------------------------------------
+文件 3：mr_dtg_plus_path_search.cpp
+路径：EDEN/Mapping/mr_dtg_plus/src/mr_dtg_plus_path_search.cpp
+----------------------------------------------------------------------
+
+修改内容：
+
+(3.1) 新增函数 BuildSpectralGraph 的实现：
+  - 输入 tarhs 和 paths（来自 ParallelDijkstra 的输出）
+  - 构建 n x n 相似性矩阵 W
+  - 对每对 (i, j)，从 h_dist_map_ 查询 d_ij：
+      ha_idx = min(tarhs[i-1]->id_, tarhs[j-1]->id_) * 10000000
+             + max(tarhs[i-1]->id_, tarhs[j-1]->id_);
+      查询 h_dist_map_.find(ha_idx)
+  - 计算 sigma = median({d_ij | e_ij exists})
+  - 计算 w_ij = exp(-d_ij / sigma)
+  - 计算度 d_i = sum_j(w_ij)
+  - 构建对角矩阵 D
+  - 计算 L = D - W
+  - 存储到 spectral_data_
+
+(3.2) 新增函数 ComputeNormalizedLaplacian 的实现：
+  - 对每个 i，D_inv_sqrt(i,i) = 1.0 / sqrt(max(d_i, 1e-10))
+  - L_norm = D_inv_sqrt * L * D_inv_sqrt
+  - L_norm 是对称矩阵，保证特征值为实数
+
+(3.3) 新增函数 ComputeFiedlerVector 的实现：
+  LOBPCG 求解 L_norm * x = lambda * x 的第二小特征对。
+  注意：LOBPCG 用 Eigen 实现，不使用外部依赖（如 Spectra/ARPACK）。
+  基本流程：
+    a. 初始化：取随机向量 x，与已知常向量 (1,1,...,1)/sqrt(n) 正交化
+       若 hot_start 为 true，使用 spectral_data_.fiedler 作为初始猜测
+    b. 迭代：
+       - 计算 Rayleigh 商 ρ = x^T * L_norm * x / (x^T * x)
+       - 计算残差 r = L_norm * x - ρ * x
+       - 应用预条件子（Jacobi: P = diag(L_norm - ρ*I)^(-1)）
+       - 更新搜索子空间
+       - Ritz 值的 Rayleigh-Ritz 过程
+       - 收敛判断：|r|_2 < tol
+    c. 输出第二小的 Ritz 值 = lambda_2，对应 Ritz 向量 = Fiedler 向量 f^(2)
+
+(3.4) 新增函数 SpectralSequence 的实现（这是最核心的新函数）：
+  替代原有的 Prim + DFS walk 逻辑（原 TspApproxiPlan 行 1047-1153）。
+
+  算法步骤：
+    a. 调用 BuildSpectralGraph(tarhs, paths)
+    b. 调用 ComputeNormalizedLaplacian()
+    c. 判断 hot_start（若 spectral_data_.fiedler 非空则热启动，否则冷启动）
+    d. 调用 ComputeFiedlerVector(hot_start)
+    e. 按 Fiedler 值升序生成索引排序：
+       创建 pair(fiedler_value, tarhs_index) 列表 → 排序
+    f. "最远叶节点最后"优化：
+       - 查找 Fiedler 绝对值最大的节点（谱最深节点）
+       - 若其到起点的物理距离也是所有节点中最远的，
+         且该节点已在排序序列末尾 → 保持其末尾位置
+       - 否则不强制调序（以谱序为准）
+    g. 输出 route_h = 按上述顺序排列的 tarhs
+
+(3.5) 新增函数 UpdateLambda2Bar 的实现：
+  spectral_data_.lambda2_bar = alpha * spectral_data_.lambda2_bar
+                             + (1-alpha) * spectral_data_.lambda2;
+
+(3.6) 新增函数 ShouldTriggerPartition 的实现：
+  return (spectral_data_.n >= spectral_config_.N_min)
+      && (spectral_data_.lambda2 < spectral_data_.lambda2_bar / 2.0);
+
+(3.7) 新增函数 SpectralKMeans 的实现：
+  输入：spectral_data_.fiedler（长度 n）
+  输出：labels（长度 n，值为 0 或 1）
+  简单 Lloyd 算法：
+    a. 初始化两个中心：min(fiedler) 和 max(fiedler)
+    b. 迭代分配和更新中心直到收敛（通常 2-3 轮即可）
+    c. 返回每个节点离最近中心的索引
+
+(3.8) 新增函数 InitFiedlerForNewNode 的实现：
+  - 找到新节点在 DTG 中的所有已存在邻居
+  - 计算加权平均：f_new = sum(w * f_j) / sum(w)
+  - 将 f_new 插入 spectral_data_.fiedler 并更新矩阵维度
+
+(3.9) 新增 GetGainExp1Spectral 和 GetGainExp2Spectral 的实现：
+
+  GetGainExp1Spectral 核心伪代码：
+    // 原始 EDEN 计算（与现有 GetGainExp1 完全相同）
+    Eigen::Vector3d dp = (vp.head(3) - ps.head(3)).normalized();
+    Eigen::Vector3d dv = dp * v_max_ - vs.head(3);
+    double a_cost = 0.0;
+    double det_theta, v1_max;
+    if (vs.norm() < 0.01) {
+        a_cost = 0;
+        v1_max = v_max_;
+    } else {
+        det_theta = acos(dp.dot(vs.normalized())) * 2;
+        double r = (vp.head(3) - ps.head(3)).norm() / sin(det_theta * 0.5);
+        double omiga = sqrt(a_max_ * lambda_a_ / r);
+        v1_max = min(r * omiga, v_max_);
+        a_cost = det_theta / omiga * acc_gain_;
+    }
+    double t_ed = max(dist / v1_max,
+                      abs(EROI_->YawDiff(vp(3), ps(3))) / yv_max_ * yaw_gain_)
+                + a_cost;
+    // === 新增：谱一致性项 ===
+    double max_abs_fiedler = spectral_data_.fiedler.cwiseAbs().maxCoeff();
+    if (max_abs_fiedler < 1e-10) max_abs_fiedler = 1.0;
+    double spectral_mod = spectral_config_.lambda_s
+                        * (1.0 - abs(fiedler_val) / max_abs_fiedler)
+                        * (dist / v_max_);
+    double t = t_ed + spectral_mod;
+    return exp(-lambda_e_ * t);
+
+  GetGainExp2Spectral：同理在 t 的计算中加入相同的谱一致性项 spectral_mod。
+
+----------------------------------------------------------------------
+文件 4：mr_dtg_plus.cpp
+路径：EDEN/Mapping/mr_dtg_plus/src/mr_dtg_plus.cpp
+----------------------------------------------------------------------
+
+修改内容：
+
+(4.1) 修改 TspApproxiPlan 函数（行 943-1176）：
+  具体改动：
+
+  a. 保留前面的步骤（行 943-999）不变：
+     - GetHnodesBBX → 获取局部 H 节点
+     - LRM_->GetDists → Dijkstra 寻路
+     - ParallelDijkstra → 找活跃边界区域 tarhs
+
+  b. 保留距离矩阵构建（行 1003-1045）不变：
+     - dist_mat 仍然需要构建（后续查询 d_ij 可以复用）
+
+  c. 替换 EOHDT 核心部分（行 1047-1153）：
+     将以下代码块：
+       /* 生成最小生成树 */
+       Prim(dist_mat, parent, branches);
+       /* 找出最远的分支 */
+       ... banned_leaf ...
+       /* heuristicly choose route */
+       ... DFS walk with stack ...
+     替换为：
+       // === Spectral-EDEN: 用谱序重排替换 EOHDT ===
+       SpectralSequence(tarhs, paths, ps, route_h);
+       // 如果没有成功（谱计算失败），回退到原 EOHDT
+       if (route_h.empty()) {
+         Prim(dist_mat, parent, branches);
+         // ... 保留原有 EOHDT 逻辑作为 fallback ...
+       }
+
+  d. 保留末尾 DebugLineStrip 等输出不变
+
+(4.2) 修改 BfUpdate 函数（行 420-679）：
+  在新 H-node 或 F-node 创建后（CreateConnectFnode 调用之后），调用：
+    if (use_spectral_sequencing_) {
+      InitFiedlerForNewNode(new_h_ptr);
+    }
+  确保新节点被纳入谱图数据结构。
+
+(4.3) 修改 DistMaintTimerCallback 函数（行 1178-1237）：
+  在距离缓存维护完成后，若谱数据有效，调用：
+    if (use_spectral_sequencing_ && spectral_data_.spectral_valid) {
+      UpdateLambda2Bar();
+    }
+
+----------------------------------------------------------------------
+文件 5：mr_dtg_plus_path_search.cpp（FindFastExpTarget 函数修改）
+路径：EDEN/Mapping/mr_dtg_plus/src/mr_dtg_plus_path_search.cpp
+----------------------------------------------------------------------
+
+修改内容：
+
+(5.1) 在 FindFastExpTarget 函数（行 745 开始）中，将现有的 GetGainExp1 调用
+  替换为 GetGainExp1Spectral，将 GetGainExp2 调用替换为 GetGainExp2Spectral。
+
+  具体替换位置：
+  - 行 859:  gain1 = GetGainExp1(ps, vp, vs3, dist);
+    替换为: gain1 = GetGainExp1Spectral(ps, vp, vs3, dist, fiedler_val);
+    其中 fiedler_val 需要从该 EROR 对应的边界区域 H-node 查询谱数据
+
+  - 行 911:  gain1 = GetGainExp1(ps, vp, vs3, lrn->path_g_) * amp;
+    替换为: gain1 = GetGainExp1Spectral(ps, vp, vs3, lrn->path_g_, fiedler_val) * amp;
+
+  - 行 943:  gain2 = GetGainExp2(ps, vp, vs3, lrn->path_g_, ...) * amp;
+    替换为: gain2 = GetGainExp2Spectral(ps, vp, vs3, lrn->path_g_, ..., fiedler_val) * amp;
+
+  - 行 985:  gain1 = GetGainExp1(ps, vp, vs3, dist);
+    替换为: gain1 = GetGainExp1Spectral(ps, vp, vs3, dist, fiedler_val);
+
+  注意：fiedler_val 的获取方式：
+    需要建立一个从 fid（EROI id）到 spectral_data_.fiedler 索引的映射。
+    因为 tarhs 由 ParallelDijkstra 给出，而 FindFastExpTarget 中的 hfe 是
+    tarhs 中第一个 H-node 的 hf_edge。
+    建议在 TspApproxiPlan 调用 SpectralSequence 后，将 Fiedler 值存储到
+    对应的 H-node 的一个新成员变量中（如 h->fiedler_val_），
+    然后在 FindFastExpTarget 中直接通过 h->fiedler_val_ 读取。
+
+----------------------------------------------------------------------
+文件 6：mr_dtg_plus_structures.h（H_node 结构体修改）
+路径：EDEN/Mapping/mr_dtg_plus/include/mr_dtg_plus/mr_dtg_plus_structures.h
+----------------------------------------------------------------------
+
+修改内容：
+
+(6.1) 在 H_node 结构体中新增成员变量：
+  double fiedler_val_ = 0.0;  // 该 H-node 在当前谱图计算中的 Fiedler 值
+  int spectral_cluster_ = -1; // 谱聚类分区标签（-1=未分配, 0/1=分区号）
+
+================================================================================
+第三部分：关键数学公式及代码实现参考
+================================================================================
+
+3.1 相似性矩阵构建：
+  sigma = median({d_ij | d_ij exists in h_dist_map_, i != j})
+  w_ij = exp(-d_ij / sigma)
+  注意：d_ii = 0 → w_ii = 1（节点与自身的权重）
+
+3.2 归一化拉普拉斯：
+  D_inv_sqrt(i,i) = 1.0 / sqrt(max(d_i, 1e-10))
+  L_norm = I - D_inv_sqrt * W * D_inv_sqrt
+  其中 I 是 n x n 单位矩阵
+
+3.3 LOBPCG 简化伪代码（求解 L_norm 的最小 k 个特征对，k=2~3）：
+  // 输入：L_norm (n x n 对称), k, max_iter, tol
+  // 输出：eigenvalues[k], eigenvectors[n x k]
+
+  // 1. 初始化块向量 X (n x k) 为随机正交向量
+  //    若 hot_start，用上轮的 eigenvectors 作为 X
+  //    X 的第一列设为 (1,1,...,1)/sqrt(n)（对应 lambda=0 平凡解，加速收敛）
+  // 2. 计算 Rayleigh-Ritz:
+  //    S = X^T * L_norm * X   (k x k)
+  //    解 S * U = U * Theta (k x k 特征分解)
+  //    排序 Theta 和 U 的列（升序）
+  //    X = X * U
+  //    P = L_norm * X - X * Theta  (残差)
+  // 3. 应用预条件子 T = diag(1/|L_norm_ii - theta_i|) * P
+  //    正交化 T 对 X
+  // 4. 扩展子空间 [X, P, T]，做 Rayleigh-Ritz 收缩
+  // 5. 收敛判断：若 max|P_i| < tol，停止
+  // 6. 输出第二小特征值 lambda_2 和对应特征向量（跳过第一列 lambda_1=0）
+
+3.4 指数滑动平均：
+  lambda_2_bar = 0.92 * lambda_2_bar + 0.08 * lambda_2
+
+3.5 谱一致性修正（在 t 中加入）：
+  spectral_mod = lambda_s * (1 - |f_i| / max_j|f_j|) * (dist / v_max)
+  其中 lambda_s = 0.05
+
+================================================================================
+第四部分：实现注意事项
+================================================================================
+
+(1) 数值稳定性：所有除法前检查分母 > 1e-10，sigma 若为 0 则设为 1.0。
+
+(2) 回退机制：若 SpectralSequence 失败（特征值不收敛、n < N_min 等），
+   必须回退到原 EOHDT 逻辑，保证系统稳定运行。
+
+(3) 计算时间预算：整个 SpectralSequence 调用（包括 BuildSpectralGraph +
+   ComputeNormalizedLaplacian + ComputeFiedlerVector）应在 ~1.5ms 内完成。
+   对于 n < 30（EDEN 典型场景），LOBPGC 3-5 次迭代足矣。
+
+(4) 增量更新顺序：BfUpdate → InitFiedlerForNewNode → DistMaintTimerCallback
+   → UpdateLambda2Bar → 下一个周期 TspApproxiPlan → SpectralSequence。
+
+(5) 距离矩阵 dist_mat 仍然构建（保留在 TspApproxiPlan 中），因为：
+   a. 作为 EOHDT fallback 的输入
+   b. dist_mat 本身就是查表操作，计算开销极低（~0.01ms）
+   c. 谱图边权 w_ij 需要从中读取 d_ij
+
+(6) 所有新增代码使用 DTGPlus 命名空间（与现有代码一致）。
+
+(7) 保持所有现有接口不变（TspApproxiPlan 的输入输出签名不变），
+   确保调用方（上层探索控制逻辑）无需任何修改。
+
+(8) 只使用标准 C++11 和 Eigen 库，不引入新的第三方依赖。
+   Eigen::SelfAdjointEigenSolver 可在 n < 30 时直接替代 LOBPCG
+   作为简易实现（n 很小时 Jacobi 特征分解比 LOBPCG 更快），
+   但正式的 LOBPCG 实现在 n 增长时更优。
+
+================================================================================
+第五部分：预期性能指标
+================================================================================
+
+  - 谱图构建：~0.2ms（n < 30，查表操作）
+  - LOBPCG：~0.5ms（热启动 3-5 迭代）~1.0ms（冷启动 10-15 迭代）
+  - 谱序重排：~0.05ms（排序 n 个值）
+  - 总增量：< 1.5ms（与 EDEN 原 EOHDT 的 ~1.0ms 可比）
+
+================================================================================
+提示词结束
+================================================================================
