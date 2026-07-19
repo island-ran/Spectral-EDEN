@@ -3,13 +3,30 @@
 void SingleExpFSM::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     ros::NodeHandle nh_ = nh;
     trigger_sub_ = nh_.subscribe("/start_trigger", 1, &SingleExpFSM::TriggerCallback, this);
-    debug_sub_ = nh_.subscribe("/debug_topic", 1, &SingleExpFSM::DebugSub, this);
     fsm_timer_ = nh.createTimer(ros::Duration(0.01), &SingleExpFSM::FSMCallback, this);
     S_planner_.init(nh, nh_private);
     exploring_ = false;
+    start_trigger_ = false;
     state_ = M_State::SLEEP;
     t0_ = ros::WallTime::now().toSec();
     force_sample_ = false;
+    const std::string ns = ros::this_node::getName();
+    nh_private.param(
+        ns + "/Exp/RetryBackoffInitial",
+        retry_backoff_initial_, 0.10);
+    nh_private.param(
+        ns + "/Exp/RetryBackoffMax",
+        retry_backoff_max_, 1.00);
+    retry_backoff_initial_ =
+        std::max(0.01, retry_backoff_initial_);
+    retry_backoff_max_ =
+        std::max(retry_backoff_initial_, retry_backoff_max_);
+    retry_backoff_current_ = retry_backoff_initial_;
+    consecutive_planning_failures_ = 0;
+    nh_private.param(
+        ns + "/Exp/FinishHoldInterval",
+        finish_hold_interval_, 1.00);
+    finish_hold_interval_ = std::max(0.05, finish_hold_interval_);
 }
 
 void SingleExpFSM::TriggerCallback(const std_msgs::EmptyConstPtr &msg){
@@ -17,31 +34,14 @@ void SingleExpFSM::TriggerCallback(const std_msgs::EmptyConstPtr &msg){
     exploring_ = true;
 }
 
-void SingleExpFSM::DebugSub(const std_msgs::Empty &msg){
-    S_planner_.StopDebugFunc();
-    getchar();
-}
-
 void SingleExpFSM::FSMCallback(const ros::TimerEvent &e){
-    bool exc_plan = false;
-    int ap = S_planner_.AllowPlan(ros::WallTime::now().toSec());
-    
-    if(ap == 0) exc_plan = true;                                                                           
-    else if(ap == 1) exc_plan = true;                  // satisfy plan interval   
-    else if(ap == 2) exc_plan = true;                   // infeasible position           
-    // else if(ap == 3 /*&& (state_ == M_State::EXCUTE || state_ == M_State::LOCALPLAN)*/) exc_plan = true; //only allow check viewpoints and check the traj feasibility
-    else if(ap == 3) {
-        // if(state_ == M_State::LOCALPLAN){
-        //     exc_plan = false;
-        //     S_planner_.ForceUpdateEroiDtg();
-
-        // } 
-        // else{
-            exc_plan = true;
-        // }
+    if(S_planner_.ExplorationFinished() &&
+       state_ != M_State::FINISH){
+        ChangeState(M_State::FINISH);
     }
-    // else if(ap == 4 && state_ == M_State::LOCALPLAN) exc_plan = true;
-    else if(ap == 5) exc_plan = true;                   // traj time up
+    const int ap =
+        S_planner_.AllowPlan(ros::WallTime::now().toSec());
+    bool exc_plan = ap != 1;
 
     if(force_sample_){
         force_sample_ = false;
@@ -53,11 +53,8 @@ void SingleExpFSM::FSMCallback(const ros::TimerEvent &e){
 
     if(!exc_plan) {
         if(state_ == M_State::LOCALPLAN){
-            cout<<"ap:"<<ap<<endl;
-            // ROS_WARN("not allow plan");
-            // cout<<"state_:"<<state_<<endl;
-            // cout<<"plan:"<<S_planner_.plan_t_ - t0_<<endl;
-            // cout<<"dt:"<<S_planner_.plan_t_ - ros::WallTime::now().toSec()<<endl;
+            ROS_DEBUG_THROTTLE(
+                1.0, "local planner waiting for retry deadline");
         }
         return;
     }
@@ -66,16 +63,10 @@ void SingleExpFSM::FSMCallback(const ros::TimerEvent &e){
         case M_State::EXCUTE :{
             /* trajectory check */
             if(!S_planner_.TrajCheck()){     
-                if(ap == 2){                 //recovery
-                    S_planner_.SetPlanInterval(0.009);
-                    break;
-                }
-                else{   //try to replan
-                    ROS_WARN("traj occ or relpan");
-                    ChangeState(M_State::LOCALPLAN);
-                    S_planner_.SetPlanInterval(0.009);
-                    break;
-                }
+                ROS_WARN("traj occ or relpan");
+                ChangeState(M_State::LOCALPLAN);
+                S_planner_.SetPlanInterval(0.009);
+                break;
             }
 
             /* viewpoints check */
@@ -88,51 +79,46 @@ void SingleExpFSM::FSMCallback(const ros::TimerEvent &e){
                 break;
             }
             
-            // if(S_planner_.FindShorterPath()){
-            //     ROS_WARN("shorter path");
-            //     ChangeState(M_State::LOCALPLAN);
-            // }
-            // if(S_planner_.AllowReplan()){
-            //     ChangeState(M_State::TRAJREPLAN);
-            //     S_planner_.SetPlanInterval(0.009);
-            //     break;
-            // }
-
             /* still EXCUTE */
             S_planner_.SetPlanInterval(0.05);
             break;
         }
         case M_State::FINISH :{
-            S_planner_.SetPlanInterval(0.009);
+            S_planner_.SetPlanInterval(finish_hold_interval_);
             break;
         }
         case M_State::LOCALPLAN :{
-            if(ap == 2 || ap == 3){                                       
-                S_planner_.SetPlanInterval(0.009);
-                // ChangeState(M_State::LOCALPLAN);
-                break;
-            }
-
             if(S_planner_.EdenPlan()){                 //plan success
+                retry_backoff_current_ = retry_backoff_initial_;
+                consecutive_planning_failures_ = 0;
                 S_planner_.SetPlanInterval(0.009);
                 ChangeState(M_State::EXCUTE);
                 break;
             }
             else{
-                if(ap == 2)
-                    S_planner_.SetPlanInterval(0.009);
-                else
-                    S_planner_.SetPlanInterval(0.009);
+                ++consecutive_planning_failures_;
+                if(consecutive_planning_failures_ >= 3){
+                    ROS_WARN(
+                        "planning failed %d consecutive times; "
+                        "invalidating the committed target and "
+                        "forcing a fresh map/graph sample",
+                        consecutive_planning_failures_);
+                    S_planner_.EscalatePlanningFailure();
+                    force_sample_ = true;
+                    consecutive_planning_failures_ = 0;
+                }
+                S_planner_.SetPlanInterval(retry_backoff_current_);
+                ROS_WARN_THROTTLE(
+                    1.0,
+                    "local planning failed; retrying in %.2f s",
+                    retry_backoff_current_);
+                retry_backoff_current_ = std::min(
+                    retry_backoff_max_,
+                    retry_backoff_current_ * 2.0);
                 break;
             }
             break;
         }
-        // case M_State::TRAJREPLAN :{
-        //     S_planner_.TrajReplan();
-        //     S_planner_.SetPlanInterval(0.009);
-        //     ChangeState(M_State::EXCUTE);
-        //     break;
-        // }
         case M_State::SLEEP :{
             if(!exploring_){
                 if(start_trigger_)

@@ -95,7 +95,6 @@ Exp/strong_check_interval: 3.0
 Exp/check_duration: 3.5
 Exp/exc_duration: 0.5
 Exp/replan_duration: 1.25
-Exp/traj_replan_duration: 0.4
 Exp/takeoff_x: 0.0
 Exp/takeoff_y: 0.0
 Exp/takeoff_z: 1.0
@@ -195,28 +194,9 @@ Computation/vdata_name4: corridor_plan
 Computation/vdata_name5: traj_plan
 Computation/vdata_name6: mem
 
-# Spectral-EDEN V4.1: persistent real-edge skeleton and one macro target.
-MR_DTG/SpectralV41/enabled: true
-MR_DTG/SpectralV41/log_diagnostics: true
-MR_DTG/SpectralV41/skeleton_max_nodes: 64
-MR_DTG/SpectralV41/dense_refresh_max_nodes: 48
-MR_DTG/SpectralV41/iterative_vector_count: 2
-MR_DTG/SpectralV41/iterative_max_iterations: 12
-MR_DTG/SpectralV41/residual_threshold: 1.0e-4
-MR_DTG/SpectralV41/exact_refresh_residual: 5.0e-4
-MR_DTG/SpectralV41/maximum_version_lag: 2
-MR_DTG/SpectralV41/quotient_max_regions: 8
-MR_DTG/SpectralV41/local_frontier_top_k: 8
-MR_DTG/SpectralV41/target_switch_margin_sec: 0.7
-MR_DTG/SpectralV41/minimum_target_commit_sec: 1.0
-MR_DTG/SpectralV41/region_gain_weight: 1.0
-MR_DTG/SpectralV41/region_history_weight: 1.0
-MR_DTG/SpectralV41/actual_gain_epsilon: 10.0
-MR_DTG/SpectralV41/main_thread_warning_ms: 5.0
-MR_DTG/SpectralV41/worker_warning_ms: 30.0
-
 Exp/VolumeCoverageEnabled: true
 Exp/TotalExplorableVolume: 3170.0
+Exp/VolumeCoverageThreshold: 0.99
 
 Exp/FinishStableDuration: 2.0
 Exp/FinishTotalGainThreshold: 10.0

@@ -177,8 +177,10 @@ void LowResMap::VoronoiPartitionSearch(list<pair<uint32_t, Eigen::Vector3d>> &se
             p3i = d + c_node->pos_;
 
             // ROS_WARN("VoronoiPartitionSearch2.1");
-            if(!GlobalPos2LocalBidNid(p3i, bid, nid))
+            if(!GlobalPos2LocalBidNid(p3i, bid, nid)){
                 StopageDebug("VoronoiPartitionSearch, Impossible initiate2");
+                continue;
+            }
             double g_tmp = c_node->g_score_ + d.cast<double>().cwiseProduct(node_scale_).norm() + 0.0001;// + GetDist(diff(0), diff(1), diff(2));
             // ROS_WARN("VoronoiPartitionSearch2.2");
             // cout<<"g_tmp:"<<g_tmp<<endl;
@@ -318,12 +320,14 @@ void LowResMap::VoronoiPathRetrieve(tr1::unordered_map<uint32_t, uint32_t> &idx_
         // ROS_WARN("VoronoiPathRetrieve1");
 
         auto n1 = GlobalPos2LocalNode(p);
+        if(n1 == nullptr || n1 == Outnode_) continue;
 
         // if(n1 == NULL || n1 == Outnode_){
         //     StopageDebug("VoronoiPathRetrieve, n1 == NULL || n1 == Outnode_");
         // }
 
         idx1 = idx_dict.find(n1->root_id_);
+        if(idx1 == idx_dict.end()) continue;
         // if(idx1 == idx_dict.end()) {
         //     cout<<"n1->root_id_:"<<int(n1->root_id_)<<endl;
         //     cout<<"p:"<<p.transpose()<<endl;
@@ -372,6 +376,7 @@ void LowResMap::VoronoiPathRetrieve(tr1::unordered_map<uint32_t, uint32_t> &idx_
 
             p3i = mn + p;
             auto n2 = GlobalPos2LocalNode(p3i);
+            if(n2 == nullptr || n2 == Outnode_) continue;
             // if(n2 == Outnode_) {
             //     cout<<"p:"<<p.transpose()<<endl;
             //     cout<<"mn:"<<mn.transpose()<<endl;
@@ -390,6 +395,7 @@ void LowResMap::VoronoiPathRetrieve(tr1::unordered_map<uint32_t, uint32_t> &idx_
             // }
             if(n2->root_id_ == n1->root_id_ || n2->root_id_ == 0) continue; // same root
             idx2 = idx_dict.find(n2->root_id_);
+            if(idx2 == idx_dict.end()) continue;
             // if(idx2 == idx_dict.end()) {
             //     cout<<"n2->root_id_:"<<int(n2->root_id_)<<endl;
             //     StopageDebug("VoronoiPathRetrieve idx_dict end2");
@@ -422,17 +428,21 @@ void LowResMap::VoronoiPathRetrieve(tr1::unordered_map<uint32_t, uint32_t> &idx_
 
             // retireve if have path 
             if(D(i, j) < 999999.8){ 
+                path1.clear();
+                path2.clear();
                 // if(i >= path_connections.size() || j >= path_connections[i].size()){
                 //     StopageDebug("i >= path_connections.size() || j >= path_connections[i].size()");
                 // }
                 // // ROS_WARN("VoronoiPathRetrieve5.2");
 
                 if(!RetrieveHPath(path_connections[i][j].first, path1, dist, true)){
-                    StopageDebug("VoronoiPathRetrieve, no path1");
+                    ROS_ERROR("VoronoiPathRetrieve failed to retrieve path1");
+                    continue;
                 }
                 // // ROS_WARN("VoronoiPathRetrieve5.25");
                 if(!RetrieveHPath(path_connections[i][j].second, path2, dist, false)){
-                    StopageDebug("VoronoiPathRetrieve, no path2");
+                    ROS_ERROR("VoronoiPathRetrieve failed to retrieve path2");
+                    continue;
                 }
                 path1.insert(path1.end(), path2.begin(), path2.end());
                 hh_idx.emplace_back(i, j);
@@ -542,8 +552,10 @@ void LowResMap::GetDists(const Eigen::Vector3d &origin, vector<Eigen::Vector3d> 
         /* update neighbours' relationship */
         for(auto &d : iter_list){
             p3i = d + c_node->pos_;
-            if(!GlobalPos2LocalBidNid(p3i, bid, nid))
+            if(!GlobalPos2LocalBidNid(p3i, bid, nid)){
                 StopageDebug("VoronoiPartitionSearch, Impossible initiate2");
+                continue;
+            }
             double g_tmp = c_node->g_score_ + d.cast<double>().cwiseProduct(node_scale_).norm() + 0.0001;// + GetDist(diff(0), diff(1), diff(2));
 
             if(LG_[bid]->local_grid_[nid]->path_g_ > g_tmp){                         //create a new node
@@ -649,8 +661,10 @@ bool LowResMap::GetPath(const Eigen::Vector3d &start, const Eigen::Vector3d &end
         /* update neighbours' relationship */
         for(auto &d : iter_list){
             p3i = d + c_node->pos_;
-            if(!GlobalPos2LocalBidNid(p3i, bid, nid))
+            if(!GlobalPos2LocalBidNid(p3i, bid, nid)){
                 StopageDebug("VoronoiPartitionSearch, Impossible initiate2");
+                continue;
+            }
 
             pt = GlobalId2GlobalPos(p3i);
             double f_tmp = c_node->g_score_ + d.cast<double>().cwiseProduct(node_scale_).norm() + 0.0001 + (pt - end).norm();// + GetDist(diff(0), diff(1), diff(2));

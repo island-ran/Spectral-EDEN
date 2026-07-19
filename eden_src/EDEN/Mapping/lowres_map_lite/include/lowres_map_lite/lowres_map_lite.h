@@ -1106,9 +1106,7 @@ inline void LowResMap::CheckNode(const Eigen::Vector3i pos){
 
 
 inline void LowResMap::StopageDebug(string c){
-    std::cout << "\033[0;31m "<<c<<" \033[0m" << std::endl;    
-    ros::shutdown();
-    getchar();
+    ROS_ERROR_STREAM("[LowResMap invariant] " << c);
 }
 
 inline void LowResMap::InitializeBlock(const int &lid, const int &bid){
@@ -1157,7 +1155,10 @@ inline void LowResMap::InitializeBlock(const int &lid, const int &bid){
 
 inline uint8_t LowResMap::PathDir2PathId(const vector<Eigen::Vector3i> &dirs){
     int s = dirs.size();
-    if(s > 3) StopageDebug("PathDir2PathId: large s");
+    if(s > 3){
+        StopageDebug("PathDir2PathId: large s");
+        return 0;
+    }
     uint8_t id = 0;
     int g = 1;
     for(int i = 0; i < s; i++){
@@ -1175,6 +1176,7 @@ inline uint8_t LowResMap::PathDir2PathId(const vector<Eigen::Vector3i> &dirs){
             }
             else{
                 StopageDebug("PathDir2PathId: impossible dir");
+                return 0;
             }
         }
         g *= 6;

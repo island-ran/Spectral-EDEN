@@ -8,6 +8,7 @@
 #include <list>
 #include <tr1/unordered_map>
 #include <fstream>
+#include <stdexcept>
 #include <unistd.h>
 #include <sys/resource.h>
 #include <eroi/eroi.h>
@@ -16,11 +17,9 @@
 #include <block_map_lite/block_map_lite.h>
 #include <lowres_map_lite/lowres_map_lite.h>
 #include <gcopter/traj_opt.h>
-// #include <frontier_grid/frontier_grid.h>
 #include <swarm_data/swarm_data.h>
-// #include <graph_partition/graph_partition.h>
-// #include <group_work/group_work.h>
 #include <data_statistics/computation_statistician.h>
+#include <eden/eden_safety.h>
 
 #include <visualization_msgs/MarkerArray.h>
 #include <swarm_exp_msgs/LocalTraj.h>
@@ -37,9 +36,6 @@ typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, nav_
     SyncPolicyImageOdom;
 typedef shared_ptr<message_filters::Synchronizer<SyncPolicyImageOdom>> SynchronizerImageOdom;
 
-typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, nav_msgs::Odometry>
-    SyncPolicyPCLOdom;
-typedef shared_ptr<message_filters::Synchronizer<SyncPolicyPCLOdom>> SynchronizerPCLOdom;
 public:
     SingleExp(){};
     ~SingleExp(){cout<<"------==========v_mean:"<<v_total_ / max(v_num_, 1)<<endl;};
@@ -48,17 +44,13 @@ public:
     bool TrajCheck();
     int AllowPlan(const double &T);
     bool EdenPlan();
-    bool TrajReplan();
-    bool AllowReplan(){return ros::WallTime::now().toSec() > traj_replan_t_ && ros::WallTime::now().toSec() + 0.2 < traj_end_t_;};
-    bool GoHome();
-    bool FindShorterPath();
     int ViewPointsCheck(const double &t);
     void ForceUpdateEroiDtg();
-    void StopDebugFunc();
-
-    double plan_t_;
+    void EscalatePlanningFailure();
+    bool ExplorationFinished() const { return exploration_finished_; }
 
 private:
+    double plan_t_;
 
     /**
      * @brief update voxel map through depth image
@@ -68,14 +60,6 @@ private:
      */
     void ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
         const nav_msgs::OdometryConstPtr& odom);
-    /**
-    * @brief update voxel map through point cloud
-    * 
-    * @param pcl 
-    * @param odom 
-    */
-    void PCLOdomCallback(const sensor_msgs::PointCloud2ConstPtr& pcl,
-            const nav_msgs::OdometryConstPtr& odom);
     void BodyOdomCallback(const nav_msgs::OdometryConstPtr& odom);
     void ReloadMap(const ros::TimerEvent &e);
     void UpdateDTG(const ros::TimerEvent &e);
@@ -98,9 +82,7 @@ private:
 
     shared_ptr<message_filters::Subscriber<nav_msgs::Odometry>> vi_odom_sub_;
     shared_ptr<message_filters::Subscriber<sensor_msgs::Image>> depth_sub_;
-    shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>> pcl_sub_;
     SynchronizerImageOdom sync_image_odom_;
-    SynchronizerPCLOdom sync_pointcloud_odom_;
 
     Eigen::MatrixX4d camFov_;
     Eigen::Matrix3Xd camV_;
@@ -108,7 +90,6 @@ private:
     lowres_lite::LowResMap LRM_;
     BlockMapLite BM_;
     ComputationStatistician CS_;
-    // SwarmDataManager SDM_;
     EroiGrid EROI_;
     ColorManager CM_;
     DTGPlus::MultiDtgPlus DTG_;
@@ -118,12 +99,15 @@ private:
     bool run_branch_;
     
     bool stat_;
-    double replan_t_, traj_replan_t_, reach_out_t_, traj_length_, traj_sub_length_, replan_duration_, traj_replan_duration_;
+    bool volume_coverage_enabled_;
+    bool exploration_finished_;
+    double total_explorable_volume_;
+    double volume_coverage_threshold_;
+    double finish_stable_duration_;
+    double finish_stable_since_;
+    double replan_t_, reach_out_t_, traj_length_, traj_sub_length_, replan_duration_;
     double traj_start_t_, traj_end_t_, check_duration_;
     int64_t target_f_id_, target_v_id_;
-    vector<Eigen::Vector3d> path_norm_, path_stem_, path_main_, path_sub_;
-    Eigen::Vector4d tar_norm_, tar_stem_, tar_main_, tar_sub_;
-    int traj_type_; // 1: branch, 2: norm
     Eigen::Vector3d p_, v_;
     double yaw_, yaw_v_;
     Eigen::Matrix4d robot_pose_;
@@ -162,4 +146,3 @@ private:
 // #*++=+#                  #=+++#
 // #*+++#                   %*=++*#
 // #++=*%                   #%+=++#
-                            

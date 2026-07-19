@@ -1304,15 +1304,12 @@ void BlockMapLite::ChangePtsDebug(){
         auto state = GetVoxState(IdtoPos(cp.first));
         if(state == VoxelState::unknown){
             ROS_ERROR("error state unknown");
-            getchar();
         }
         else if(state == VoxelState::outlocal){
             ROS_ERROR("error state outlocal");
-            getchar();
         }
         else if(state == VoxelState::out){
             ROS_ERROR("error state out");
-            getchar();
         }
     }
 }

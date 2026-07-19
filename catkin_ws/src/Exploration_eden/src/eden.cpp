@@ -25,7 +25,24 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     // nh_private.param(ns + "/Exp/takeoff_yaw", init_pose_(3), 0.0);
     nh_private.param(ns + "/Exp/reach_out_t", reach_out_t_, 0.1);
     nh_private.param(ns + "/Exp/statistic", stat_, false);
-    nh_private.param(ns + "/Exp/traj_replan_duration", traj_replan_duration_, 0.5);
+    nh_private.param(
+        ns + "/Exp/VolumeCoverageEnabled",
+        volume_coverage_enabled_, false);
+    nh_private.param(
+        ns + "/Exp/TotalExplorableVolume",
+        total_explorable_volume_, 0.0);
+    nh_private.param(
+        ns + "/Exp/VolumeCoverageThreshold",
+        volume_coverage_threshold_, 1.0);
+    nh_private.param(
+        ns + "/Exp/FinishStableDuration",
+        finish_stable_duration_, 2.0);
+    volume_coverage_threshold_ = std::max(
+        0.0, std::min(1.0, volume_coverage_threshold_));
+    finish_stable_duration_ =
+        std::max(0.0, finish_stable_duration_);
+    finish_stable_since_ = -1.0;
+    exploration_finished_ = false;
     
     // nh_private.param(ns + "/opt/YawVel", dyaw_max_, 2.0);
     // nh_private.param(ns + "/opt/YawAcc", ddyaw_max_, 2.0);
@@ -35,6 +52,10 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     // nh_private.param(ns + "/Exp/UseCoverTrajectory", use_cover_trajectory_, true);
     // nh_private.param(ns + "/Exp/VolumeTest", volume_test_, false);
     nh_private.param(ns + "/Exp/UpdateInterval", update_interval_, 0.2);
+    p_.setZero();
+    v_.setZero();
+    yaw_ = 0.0;
+    yaw_v_ = 0.0;
 
     // use_dir_corridor_ = use_dir_corridor_ & use_terminal_corridor_;
     // cout<<"=======------"<<use_dir_corridor_<<endl;
@@ -50,6 +71,7 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
 
     // volume_t_ = ros::WallTime::now().toSec() - 100;
     v_num_ = 0;
+    v_total_ = 0.0;
     len_ = 0.0;
 
     // LRM_->AlignInit();
@@ -90,6 +112,8 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
 
     last_map_update_t_ = ros::WallTime::now().toSec();
     traj_end_t_ = last_map_update_t_ - 0.1;
+    replan_t_ = traj_end_t_;
+    plan_t_ = last_map_update_t_;
     have_odom_ = false;
     target_f_id_ = -1;
     target_v_id_ = -1;
@@ -103,13 +127,12 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
         sync_image_odom_->registerCallback(boost::bind(&SingleExp::ImgOdomCallback, this,  _1, _2));
     }
     else{
-        pcl_sub_.reset(new message_filters::Subscriber<sensor_msgs::PointCloud2>(nh_, "/pointcloud", 10));
-        vi_odom_sub_.reset(new message_filters::Subscriber<nav_msgs::Odometry>(nh_, "/vi_odom", 10));
-        sync_pointcloud_odom_.reset(new message_filters::Synchronizer<SyncPolicyPCLOdom>(
-            SyncPolicyPCLOdom(100), *pcl_sub_, *vi_odom_sub_));
-        sync_pointcloud_odom_->registerCallback(boost::bind(&SingleExp::PCLOdomCallback, this,  _1, _2));
+        ROS_FATAL(
+            "eden currently requires Frontier/sensor_type=Depth_Camera");
+        throw std::runtime_error(
+            "unsupported frontier sensor type");
     }
-    if(stat_){
+    if(stat_ || volume_coverage_enabled_){
         stat_timer_ = nh_private_.createTimer(ros::Duration(0.5), &SingleExp::DataStatistic, this);
     }
     odom_sub_ = nh_.subscribe("/odom", 10, &SingleExp::BodyOdomCallback, this);
@@ -123,7 +146,15 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
 
 }
 void SingleExp::SetPlanInterval(const double &intv){
-    plan_t_ = ros::WallTime::now().toSec() + intv;
+    const double safe_interval =
+        EdenSafety::SanitizePlanInterval(intv);
+    if(!std::isfinite(intv) ||
+       std::abs(safe_interval - intv) > 1.0e-9){
+        ROS_ERROR(
+            "invalid planner interval %.6f; clamped to %.3f s",
+            intv, safe_interval);
+    }
+    plan_t_ = ros::WallTime::now().toSec() + safe_interval;
 }
 
 bool SingleExp::TrajCheck(){
@@ -135,43 +166,69 @@ bool SingleExp::TrajCheck(){
         return false;
     }
 
+    const double total_duration = exc_traj_.getTotalDuration();
+    if(exc_traj_.getPieceNum() <= 0 || !std::isfinite(total_duration) ||
+       total_duration <= EdenSafety::kMinTrajectoryDuration){
+        ROS_ERROR("current trajectory is numerically invalid");
+        return false;
+    }
     double end_t = min(cur_t + check_duration_, replan_t_ - 1e-3);
-    // end_t -= traj_start_t_;
-    Eigen::Vector3d last_p = exc_traj_.getPos(cur_t).head(3);
-    Eigen::Vector3d p, r_size;
-    r_size = LRM_.GetRobotSize();
-    // vector<Eigen::Vector3d> debug_pts;
-    for(double t = cur_t; t < end_t; t += 0.05){
-        p = exc_traj_.getPos(t - traj_start_t_).head(3);
-        // debug_pts.emplace_back(p.head(3));
-        for(int dim = 0; dim < 3; dim ++){
-            if(abs(p(dim) - last_p(dim)) > BM_.resolution_){ 
-                if(BM_.PosBBXOccupied(p, r_size)) { // collide
-                    dtg_flag_ = false; // need to update map
-                    ROS_WARN("collide");
-                    return false;
-                }
-                break;
-            }
+    if(end_t <= cur_t) return true;
+    const Eigen::Vector3d start_position =
+        exc_traj_.getPos(EdenSafety::RelativeTrajectoryTime(
+            cur_t, traj_start_t_, total_duration)).head(3);
+    if(!start_position.allFinite()) return false;
+    Eigen::Vector3d last_checked_position = start_position;
+    const double current_footprint_radius = std::max(
+        BM_.resolution_, 0.5 * LRM_.GetRobotSize().norm());
+    for(double t = cur_t + 0.05; t < end_t; t += 0.05){
+        const double relative_t = EdenSafety::RelativeTrajectoryTime(
+            t, traj_start_t_, total_duration);
+        const Eigen::Vector3d p =
+            exc_traj_.getPos(relative_t).head(3);
+        if(!p.allFinite()) return false;
+        if((p - start_position).norm() < current_footprint_radius ||
+           (p - last_checked_position).norm() < BM_.resolution_)
+            continue;
+        last_checked_position = p;
+        if(BM_.PosBBXOccupied(p, LRM_.GetRobotSize())) {
+            dtg_flag_ = false;
+            ROS_WARN("confirmed occupied voxel on active trajectory");
+            return false;
         }
     }
 
-
-    p = exc_traj_.getPos(end_t - traj_start_t_ - 1e-4).head(3);
-    if(BM_.PosBBXOccupied(p, r_size)) { // collide
-        dtg_flag_ = false; // need to update map
-        ROS_WARN("collide end");
+    const Eigen::Vector3d end_position =
+        exc_traj_.getPos(EdenSafety::RelativeTrajectoryTime(
+        end_t - 1e-4, traj_start_t_, total_duration)).head(3);
+    if(!end_position.allFinite()) return false;
+    if((end_position - start_position).norm() >=
+           current_footprint_radius &&
+       BM_.PosBBXOccupied(end_position, LRM_.GetRobotSize())) {
+        dtg_flag_ = false;
+        ROS_WARN("confirmed occupied endpoint on active trajectory");
         return false;
     }
-
-    // Debug(debug_pts);
     return true;
 }
 
 int SingleExp::AllowPlan(const double &T){
 
     /* not satisfy plan interval */
-    if(T - plan_t_ < 0){
+    const double deadline_remaining = plan_t_ - T;
+    if(!std::isfinite(T) || !std::isfinite(plan_t_) ||
+       deadline_remaining >
+           EdenSafety::kMaxPlanInterval + 0.1){
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "planner deadline corrupted (now=%.6f deadline=%.6f "
+            "remaining=%.3f); forcing immediate recovery",
+            T, plan_t_, deadline_remaining);
+        plan_t_ = std::isfinite(T)
+                      ? T
+                      : ros::WallTime::now().toSec();
+    }
+    else if(deadline_remaining > 0.0){
         return 1;
     }
 
@@ -181,17 +238,17 @@ int SingleExp::AllowPlan(const double &T){
     }
     // last_safe_ = p_;
 
-    // /* sensor not update */
-    // if(!dtg_flag_ || EROI_.vp_update_){
-    //     return 3;
-    // }
-
     /* traj time up */
     if(T - replan_t_ > 0){
         return 5;
     }
 
     return 0;
+}
+
+void SingleExp::EscalatePlanningFailure(){
+    DTG_.RejectPendingTargetAfterPlanningFailure(true);
+    dtg_flag_ = false;
 }
 
 
@@ -246,11 +303,12 @@ bool SingleExp::EdenPlan(){
         p4s = exc_traj_.getPos(hand_t - traj_start_t_);
         ps = p4s.head(3);
         while(!LRM_.IsFeasible(ps) && hand_t > cur_t){
-            hand_t -= reach_out_t_ / 10;
+            hand_t = max(cur_t, hand_t - reach_out_t_ / 10);
             p4s = exc_traj_.getPos(hand_t - traj_start_t_);
             ps = p4s.head(3);
         }
-        if(!LRM_.IsFeasible(ps)){
+        const bool use_measured_state = !LRM_.IsFeasible(ps);
+        if(use_measured_state){
             hand_t = cur_t;
             ps = p_;
         }
@@ -258,13 +316,22 @@ bool SingleExp::EdenPlan(){
         cout<<"t plan2:"<<hand_t - traj_start_t_<<endl;
         cout<<"t cur_t2:"<<cur_t - traj_start_t_<<endl;
         cout<<"t total2:"<<exc_traj_.getTotalDuration()<<endl;
-        v4s = exc_traj_.getVel(hand_t - traj_start_t_);
-        a4s = exc_traj_.getAcc(hand_t - traj_start_t_);
-        vs = v4s.head(3);
-        as = a4s.head(3);
-        ys = p4s(3);
-        yds = v4s(3);
-        ydds = a4s(3);
+        if(use_measured_state){
+            vs = v_;
+            as.setZero();
+            ys = yaw_;
+            yds = yaw_v_;
+            ydds = 0.0;
+        }
+        else{
+            v4s = exc_traj_.getVel(hand_t - traj_start_t_);
+            a4s = exc_traj_.getAcc(hand_t - traj_start_t_);
+            vs = v4s.head(3);
+            as = a4s.head(3);
+            ys = p4s(3);
+            yds = v4s(3);
+            ydds = a4s(3);
+        }
         ve.setZero();
         ae.setZero();
         // YawP_.GetCmd(hand_t - traj_start_t_, ys, yds, ydds);
@@ -289,10 +356,13 @@ bool SingleExp::EdenPlan(){
     toi.initState.col(2).head(3) = as;
     toi.initState(3, 2) = ydds;
 
-    uint8_t plan_res;
+    uint8_t plan_res = 1;
     vector<Eigen::Vector3d> path_stem, path_main, path_sub, path_norm, pp; 
-    pair<uint32_t, uint8_t> tar_stem, tar_main, tar_sub, tar_norm; 
-    double y_stem, y_main, y_sub, y_norm;
+    pair<uint32_t, uint8_t> tar_stem{0U, 0U};
+    pair<uint32_t, uint8_t> tar_main{0U, 0U};
+    pair<uint32_t, uint8_t> tar_sub{0U, 0U};
+    pair<uint32_t, uint8_t> tar_norm{0U, 0U};
+    double y_stem = ys, y_main = ys, y_sub = ys, y_norm = ys;
 
     Eigen::Vector4d ps_y, vs_dy;
     ps_y.head(3) = ps;
@@ -307,6 +377,12 @@ bool SingleExp::EdenPlan(){
         tar_stem, tar_main, tar_sub, tar_norm, 
         y_stem, y_main, y_sub, y_norm);
     target_duration = ros::WallTime::now().toSec() - plan_ts;
+    auto planning_failure = [&](bool hard_invalidation,
+                                const char *stage) {
+        DTG_.RejectPendingTargetAfterPlanningFailure(hard_invalidation);
+        ROS_WARN("planning failed at %s", stage);
+        return false;
+    };
     
     cout<<"plan_res:"<<int(plan_res)<<endl;
     cout<<"ps_y:"<<ps_y.transpose()<<endl;
@@ -361,7 +437,7 @@ bool SingleExp::EdenPlan(){
 
         if(pp.size() == 0){
             ROS_ERROR("path_stem size == 0");
-            getchar();
+            return planning_failure(true, "stem corridor empty");
         }
         toi.endState_stem.head(3) = LRM_.GetStdPos(pp.back());
         toi.endState_stem(3) = y_stem;
@@ -377,12 +453,12 @@ bool SingleExp::EdenPlan(){
                 plan_res = 3;
                 cout<<"s:"<<s<<endl;
                 ROS_ERROR("path_main plan_res == 2");
-                getchar();
+                return planning_failure(true, "main corridor");
             }
 
             if(pp.size() == 0){
                 ROS_ERROR("path_main size == 0");
-                getchar();
+                return planning_failure(true, "main corridor empty");
             }
             toi.endState_main.head(3) = LRM_.GetStdPos(pp.back()) - Eigen::Vector3d::Ones() * 0.05;;
             toi.endState_main(3) = y_main;
@@ -396,28 +472,28 @@ bool SingleExp::EdenPlan(){
                 plan_res = 3;
                 cout<<"s:"<<s<<endl;
                 ROS_ERROR("path_sub plan_res == 2");
-                getchar();
+                return planning_failure(true, "sub corridor");
             }
             if(pp.size() == 0){
                 ROS_ERROR("path_sub size == 0");
-                getchar();
+                return planning_failure(true, "sub corridor empty");
             }
             toi.endState_sub.head(3) = LRM_.GetStdPos(pp.back()) + Eigen::Vector3d::Ones() * 0.05;
             toi.endState_sub(3) = y_sub;
         }
         else{
             ROS_ERROR("plan_res == 2, s == 0");
-            getchar();
+            return planning_failure(true, "stem corridor");
         }
     }
 
-    if(plan_res == 3){
+    if(plan_res == 3 || plan_res == 4){
         ROS_WARN("FindCorridors norm");
         int s = LRM_.FindCorridors(path_norm, toi.corridors_norm, toi.corridorVs_norm, pp, false, traj_length_);
 
         if(pp.size() == 0){
             ROS_ERROR("path_norm size == 0");
-            getchar();
+            return planning_failure(true, "normal corridor empty");
         }
         toi.endState_norm.head(3) = LRM_.GetStdPos(pp.back());
         toi.endState_norm(3) = y_norm;
@@ -425,7 +501,7 @@ bool SingleExp::EdenPlan(){
         if(s == 0){
             cout<<"s:"<<s<<endl;
             ROS_ERROR("path_norm plan_res == 2");
-            getchar();
+            return planning_failure(true, "normal corridor");
         }
         else if(s == 2){
             if((pp.back().head(2)- path_norm.back().head(2)).norm() > 1e-3){
@@ -449,12 +525,20 @@ bool SingleExp::EdenPlan(){
         if((dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25) || !EROI_.StrongCheckViewpoint(tar_stem.first, tar_stem.second, true)){
             DTG_.RemoveVp(tar_stem.first, tar_stem.second);
             cout<<"too close branch!"<<endl;
-            return false;
+            return planning_failure(true, "branch viewpoint invalid");
         }
         plan_ts = ros::WallTime::now().toSec();
 
         if(TrajOpt_.AggressiveBranchTrajOptimize(toi)){
             traj_duration = ros::WallTime::now().toSec() - plan_ts;
+            std::string validation_error;
+            if(!EdenSafety::ValidateTrajectory(
+                    TrajOpt_.stem_traj_, &validation_error)){
+                ROS_ERROR_STREAM("reject branch trajectory: "
+                                 << validation_error);
+                return planning_failure(
+                    true, "branch trajectory validation");
+            }
             if(stat_){
                 CS_.SetVolume(target_duration, 3);
                 CS_.SetVolume(corridor_duration, 4);
@@ -466,21 +550,8 @@ bool SingleExp::EdenPlan(){
             traj_start_t_ = hand_t;
             replan_t_ = min(replan_duration_, max(exc_traj_.getTotalDuration() - 0.15, 0.0)) + traj_start_t_;
             traj_end_t_ = exc_traj_.getTotalDuration() + traj_start_t_;
-            if(TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() < TrajOpt_.upboundVec_[0] * 0.6){
-                traj_replan_t_ = traj_start_t_ + traj_replan_duration_;
-            }
-            else{
-                traj_replan_t_ = traj_start_t_ + exc_traj_.getTotalDuration() * 2.0;
-            }
             target_f_id_ = tar_stem.first;
             target_v_id_ = tar_stem.second;
-            path_stem_ = path_stem;
-            path_sub_ = path_sub;
-            path_main_ = path_main;
-            tar_stem_ = toi.endState_stem;
-            tar_sub_ = toi.endState_sub;
-            tar_main_ = toi.endState_main;
-            traj_type_ = 1;
             // cout<<"duration:"<<exc_traj_.getTotalDuration()<<endl;
             // cout<<"replan_t_1:"<<replan_t_ - cur_t<<endl;
             // cout<<"eroi state:"<<int(EROI_.EROI_[target_f_id_].f_state_)<<"  vp state:"<<int(EROI_.EROI_[target_f_id_].local_vps_[target_v_id_])<<endl;
@@ -489,53 +560,43 @@ bool SingleExp::EdenPlan(){
             ShowTraj();
             ShowPathCorridor(path_stem, toi.corridors_stem);
 
-            // cout<<"ter v:"<<TrajOpt_.main_traj_[0].getCoeffMat().col(4).transpose()<<"    "<<TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm()<<endl;
-            // cout<<"ter a:"<<TrajOpt_.main_traj_[0].getCoeffMat().col(3).transpose() * 2<<"    "<<TrajOpt_.main_traj_[0].getCoeffMat().col(3).head(3).norm() * 2<<endl;
-            Eigen::Vector3d u_stem, d_stem, u_sub, d_sub, u_main, d_main;
-            u_main(0) = -toi.corridors_main[0](0, 3);
-            u_main(1) = -toi.corridors_main[0](2, 3);
-            u_main(2) = -toi.corridors_main[0](4, 3);
-            d_main(0) = toi.corridors_main[0](1, 3);
-            d_main(1) = toi.corridors_main[0](3, 3);
-            d_main(2) = toi.corridors_main[0](5, 3);
-            // cout<<"main diff u:"<<(u_main - toi.endState_stem.head(3)).transpose()<<endl;
-            // cout<<"main diff d:"<<(d_main - toi.endState_stem.head(3)).transpose()<<endl;
-            u_sub(0) = -toi.corridors_sub[0](0, 3);
-            u_sub(1) = -toi.corridors_sub[0](2, 3);
-            u_sub(2) = -toi.corridors_sub[0](4, 3);
-            d_sub(0) = toi.corridors_sub[0](1, 3);
-            d_sub(1) = toi.corridors_sub[0](3, 3);
-            d_sub(2) = toi.corridors_sub[0](5, 3);
-            // cout<<"sub diff u:"<<(u_sub - toi.endState_stem.head(3)).transpose()<<endl;
-            // cout<<"sub diff d:"<<(d_sub - toi.endState_stem.head(3)).transpose()<<endl;
-            // cout<<"d1:"<< (toi.endState_stem.head(3) - ps).norm()<<endl;
-            // cout<<"d2:"<< (toi.endState_main.head(3) - toi.endState_stem.head(3)).norm()<<endl;
-            // cout<<"plan cost:"<<ros::WallTime::now().toSec() - cur_t<<endl;
+            // V4: Commit target after successful trajectory publish
+            {
+                DTGPlus::CommittedTarget ct;
+                ct.valid = true;
+                ct.frontier_id = tar_stem.first;
+                ct.viewpoint_id = tar_stem.second;
+                DTG_.CommitTargetAfterPublish(ct);
+            }
 
-
-
-            // if(EROI_.EROI_[target_f_id_].f_state_ != 1){
-            //     cout<<"f:"<<target_f_id_<<"  vp:"<<int(target_v_id_)<<endl;
-            //     getchar();
-            // }
             return true;
         }
         else{
-            return false;    
+            return planning_failure(false, "branch optimizer");
         }
     }
-    else if(plan_res == 3){
-        double dp = (ps - EROI_.EROI_[tar_norm.first].center_ - EROI_.vps_[tar_norm.second].head(3)).norm();
-        double dyaw = abs(EROI_.YawDiff(EROI_.vps_[tar_norm.second](3), ys));
-        if(!EROI_.StrongCheckViewpoint(tar_norm.first, tar_norm.second, true) || (dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25)){
-            DTG_.RemoveVp(tar_norm.first, tar_norm.second);
-            cout<<"too close norm!"<<endl;
-            return false;
+    else if(plan_res == 3 || plan_res == 4){
+        if(plan_res == 3){
+            double dp = (ps - EROI_.EROI_[tar_norm.first].center_ - EROI_.vps_[tar_norm.second].head(3)).norm();
+            double dyaw = abs(EROI_.YawDiff(EROI_.vps_[tar_norm.second](3), ys));
+            if(!EROI_.StrongCheckViewpoint(tar_norm.first, tar_norm.second, true) || (dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25)){
+                DTG_.RemoveVp(tar_norm.first, tar_norm.second);
+                cout<<"too close norm!"<<endl;
+                return planning_failure(true, "normal viewpoint invalid");
+            }
         }
 
         plan_ts = ros::WallTime::now().toSec();
         if(TrajOpt_.NormTrajOptimize(toi)){
             traj_duration = ros::WallTime::now().toSec() - plan_ts;
+            std::string validation_error;
+            if(!EdenSafety::ValidateTrajectory(
+                    TrajOpt_.norm_traj_, &validation_error)){
+                ROS_ERROR_STREAM("reject normal trajectory: "
+                                 << validation_error);
+                return planning_failure(
+                    true, "normal trajectory validation");
+            }
             if(stat_){
                 CS_.SetVolume(target_duration, 3);
                 CS_.SetVolume(corridor_duration, 4);
@@ -545,275 +606,46 @@ bool SingleExp::EdenPlan(){
             run_branch_ = false;
             traj_start_t_ = hand_t;
             replan_t_ = min(replan_duration_ * 2.5, max(exc_traj_.getTotalDuration() - 0.15, 0.0)) + traj_start_t_;
-            if(TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() < TrajOpt_.upboundVec_[0] * 0.6){
-                traj_replan_t_ = traj_start_t_ + traj_replan_duration_;
+            traj_end_t_ = exc_traj_.getTotalDuration() + traj_start_t_;
+            if(plan_res == 3){
+                target_f_id_ = tar_norm.first;
+                target_v_id_ = tar_norm.second;
             }
             else{
-                traj_replan_t_ = traj_start_t_ + exc_traj_.getTotalDuration() * 2.0;
+                target_f_id_ = -1;
+                target_v_id_ = -1;
             }
-            traj_end_t_ = exc_traj_.getTotalDuration() + traj_start_t_;
-            target_f_id_ = tar_norm.first;
-            target_v_id_ = tar_norm.second;
-            path_norm_ = path_norm;
-            tar_norm_ = toi.endState_norm;
-            traj_type_ = 2;
-
             cout<<"duration:"<<exc_traj_.getTotalDuration()<<endl;
             cout<<"replan_t_2:"<<replan_t_ - cur_t<<endl;
             
             PublishTraj();
             ShowTraj();
             ShowPathCorridor(path_norm, toi.corridors_norm);
+
+            // V4: Commit target after successful trajectory publish
+            {
+                DTGPlus::CommittedTarget ct;
+                ct.valid = true;
+                if(plan_res == 3){
+                    ct.frontier_id = tar_norm.first;
+                    ct.viewpoint_id = tar_norm.second;
+                }
+                DTG_.CommitTargetAfterPublish(ct);
+            }
+
             cout<<"plan cost:"<<ros::WallTime::now().toSec() - cur_t<<endl;
 
             return true;
         }
         else{
-            return false;    
+            return planning_failure(false, "normal optimizer");
         }
     }
     else{
-        return false;    
+        return planning_failure(false, "target planning");
     }
     
 }
-
-bool SingleExp::TrajReplan(){
-    Eigen::Vector3d ps, vs, as, pe, ve, ae;
-    double ys, yds, ydds, ye, yde, ydde;
-    double hand_t = max(ros::WallTime::now().toSec() + reach_out_t_ * 0.5, traj_start_t_); 
-    double cur_t = ros::WallTime::now().toSec();
-    if(hand_t > traj_end_t_){
-        if(cur_t - traj_end_t_ > 0.0){
-            hand_t = ros::WallTime::now().toSec();
-            ps = p_;
-            vs = v_;
-            as.setZero();
-            ve.setZero();
-            ae.setZero();
-            ys = yaw_;
-            yds = yaw_v_;
-            ydds = 0;
-            yde = 0; 
-            ydde = 0;
-            // ROS_ERROR("start 0==================");
-            // cout<<"t cur_t0:"<<cur_t - traj_start_t_<<endl;
-            // cout<<"t plan0:"<<hand_t - traj_start_t_<<endl;
-            // cout<<"t total0:"<<exc_traj_.getTotalDuration()<<endl;
-        }
-        else{
-            Eigen::Vector4d p4s, v4s, a4s;
-            hand_t = max(traj_end_t_ - 1e-3 - cur_t, 0.0) + cur_t;
-            p4s = exc_traj_.getPos(hand_t - traj_start_t_);
-            v4s = exc_traj_.getVel(hand_t - traj_start_t_);
-            a4s = exc_traj_.getAcc(hand_t - traj_start_t_);
-            // ROS_WARN("start 1");
-            // cout<<"t cur_t1:"<<cur_t - traj_start_t_<<endl;
-            // cout<<"t plan1:"<<hand_t - traj_start_t_<<endl;
-            // cout<<"t total1:"<<exc_traj_.getTotalDuration()<<endl;
-            ps = p4s.head(3);
-            vs = v4s.head(3);
-            as = a4s.head(3);
-            ys = p4s(3);
-            yds = v4s(3);
-            ydds = a4s(3);
-            ve.setZero();
-            ae.setZero();
-            // YawP_.GetCmd(cur_t - traj_start_t_, ys, yds, ydds);
-            yde = 0; 
-            ydde = 0;
-        }
-    }
-    else{
-        Eigen::Vector4d p4s, v4s, a4s;
-        p4s = exc_traj_.getPos(hand_t - traj_start_t_);
-        ps = p4s.head(3);
-        while(!LRM_.IsFeasible(ps) && hand_t > cur_t){
-            hand_t -= reach_out_t_ * 0.5 / 10;
-            p4s = exc_traj_.getPos(hand_t - traj_start_t_);
-            ps = p4s.head(3);
-        }
-        if(!LRM_.IsFeasible(ps)){
-            hand_t = cur_t;
-            ps = p_;
-        }
-        // ROS_WARN("start 2");
-        // cout<<"t plan2:"<<hand_t - traj_start_t_<<endl;
-        // cout<<"t cur_t2:"<<cur_t - traj_start_t_<<endl;
-        // cout<<"t total2:"<<exc_traj_.getTotalDuration()<<endl;
-        v4s = exc_traj_.getVel(hand_t - traj_start_t_);
-        a4s = exc_traj_.getAcc(hand_t - traj_start_t_);
-        vs = v4s.head(3);
-        as = a4s.head(3);
-        ys = p4s(3);
-        yds = v4s(3);
-        ydds = a4s(3);
-        ve.setZero();
-        ae.setZero();
-        // YawP_.GetCmd(hand_t - traj_start_t_, ys, yds, ydds);
-        yde = 0; 
-        ydde = 0;
-    }
-    EROI_.YawNorm(ys);
-
-    TrajOptInput toi;
-    vector<Eigen::Vector3d> path_stem_temp, path_main_temp, path_sub_temp, path_norm_temp, pp; 
-    toi.initState.resize(4, 3);
-    toi.initState.col(0).head(3) = ps;
-    toi.initState(3, 0) = ys;
-    toi.initState.col(1).head(3) = vs;
-    toi.initState(3, 1) = yds;
-    toi.initState.col(2).head(3) = as;
-    toi.initState(3, 2) = ydds;
-    if(traj_type_ == 1){
-        pe = tar_stem_.head(3);
-        if(!LRM_.IsFeasible(pe)) return false;
-        for(auto &p : path_sub_){
-            if(!LRM_.IsFeasible(p, true)){
-                ROS_WARN("sub path occ");
-                return false;
-            }
-        }
-        for(auto &p : path_main_){
-            if(!LRM_.IsFeasible(p, true)){
-                ROS_WARN("main path occ");
-                return false;
-            }
-        }
-
-        LRM_.ClearTopo();
-        double dist;
-        if(!LRM_.GetPath(ps, pe, path_stem_temp, dist)) {
-            ROS_WARN("stem path search failed");
-            return false;
-        }
-
-        ROS_WARN("stem");
-        int s = LRM_.FindCorridors(path_stem_temp, toi.corridors_stem, toi.corridorVs_stem, pp, false, INFINITY);
-        if(s != 1){
-            ROS_ERROR("path_stem corridor failed");
-            return false;
-        }
-
-        if(pp.size() == 0){
-            ROS_ERROR("path_stem size == 0");
-            getchar();
-        }
-        // for(auto p : path_stem_temp){
-        //     cout<<"pstem:"<<p.transpose()<<endl;
-        // }
-        toi.endState_stem.head(3) = pp.back();
-        toi.endState_stem(3) = tar_stem_(3);
-
-        ROS_WARN("main");
-        if(LRM_.FindCorridors(path_main_, toi.corridors_main, toi.corridorVs_main, pp, true, INFINITY) != 1) {
-            ROS_ERROR("path_main corridor failed");
-            return false;
-        }
-
-        if(pp.size() == 0){
-            ROS_ERROR("path_main size == 0");
-            getchar();
-        }
-        toi.endState_main.head(3) = pp.back() - Eigen::Vector3d::Ones() * 0.05;;
-        toi.endState_main(3) = tar_main_(3);
-
-        // ROS_WARN("FindCorridors sub");
-        // cout<<"path_sub size:"<<path_sub.size()<<endl;
-        // for(auto ps : path_sub){
-        //     cout<<"ps:"<<ps.transpose()<<endl;
-        // }
-        ROS_WARN("sub");
-        if(LRM_.FindCorridors(path_sub_, toi.corridors_sub, toi.corridorVs_sub, pp, false, traj_sub_length_) == 0) {
-            ROS_ERROR("path_sub corridor failed");
-            return false;
-        }
-        if(pp.size() == 0){
-            ROS_ERROR("path_sub size == 0");
-            getchar();
-        }
-        toi.endState_sub.head(3) = pp.back() + Eigen::Vector3d::Ones() * 0.05;
-        toi.endState_sub(3) = tar_sub_(3);
-
-        toi.camFov = camFov_;
-        toi.camV = camV_;
-        toi.traj_bbxs_main.resize(toi.corridors_main.size());
-        toi.traj_bbxs_sub.resize(toi.corridors_sub.size());
-        toi.traj_bbxs_stem.resize(toi.corridors_stem.size());
-        toi.traj_bbxs_norm.resize(toi.corridors_norm.size());
-
-        if(TrajOpt_.AggressiveBranchTrajOptimize(toi)){
-            exc_traj_ = TrajOpt_.stem_traj_;
-            run_branch_ = true;
-            traj_start_t_ = hand_t;
-            replan_t_ = min(replan_t_, min(replan_duration_, max(exc_traj_.getTotalDuration() - 0.15, 0.0)) + traj_start_t_);
-            traj_end_t_ = exc_traj_.getTotalDuration() + traj_start_t_;
-            if(TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() < TrajOpt_.upboundVec_[0] * 0.6){
-                traj_replan_t_ = traj_start_t_ + traj_replan_duration_;
-            }
-            else{
-                traj_replan_t_ = traj_start_t_ + exc_traj_.getTotalDuration() * 2.0;
-            }
-
-            // target_f_id_ = tar_stem.first;
-            // target_v_id_ = tar_stem.second;
-            path_stem_ = path_stem_temp;
-            // path_sub_ = path_sub;
-            // path_main_ = path_main;
-            // cout<<"replan_t_1:"<<replan_t_ - cur_t<<endl;
-            // cout<<"eroi state:"<<int(EROI_.EROI_[target_f_id_].f_state_)<<"  vp state:"<<int(EROI_.EROI_[target_f_id_].local_vps_[target_v_id_])<<endl;
-
-            PublishTraj();
-            ShowTraj();
-            ShowPathCorridor(path_stem_temp, toi.corridors_stem);
-
-            cout<<"replan ter v:"<<TrajOpt_.main_traj_[0].getCoeffMat().col(4).transpose()<<"    "<<TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm()<<endl;
-            cout<<"replan ter a:"<<TrajOpt_.main_traj_[0].getCoeffMat().col(3).transpose() * 2<<"    "<<TrajOpt_.main_traj_[0].getCoeffMat().col(3).head(3).norm() * 2<<endl;
-            Eigen::Vector3d u_stem, d_stem, u_sub, d_sub, u_main, d_main;
-            u_main(0) = -toi.corridors_main[0](0, 3);
-            u_main(1) = -toi.corridors_main[0](2, 3);
-            u_main(2) = -toi.corridors_main[0](4, 3);
-            d_main(0) = toi.corridors_main[0](1, 3);
-            d_main(1) = toi.corridors_main[0](3, 3);
-            d_main(2) = toi.corridors_main[0](5, 3);
-            cout<<"main diff u:"<<(u_main - toi.endState_stem.head(3)).transpose()<<endl;
-            cout<<"main diff d:"<<(d_main - toi.endState_stem.head(3)).transpose()<<endl;
-            u_sub(0) = -toi.corridors_sub[0](0, 3);
-            u_sub(1) = -toi.corridors_sub[0](2, 3);
-            u_sub(2) = -toi.corridors_sub[0](4, 3);
-            d_sub(0) = toi.corridors_sub[0](1, 3);
-            d_sub(1) = toi.corridors_sub[0](3, 3);
-            d_sub(2) = toi.corridors_sub[0](5, 3);
-            cout<<"sub diff u:"<<(u_sub - toi.endState_stem.head(3)).transpose()<<endl;
-            cout<<"sub diff d:"<<(d_sub - toi.endState_stem.head(3)).transpose()<<endl;
-            cout<<"d1:"<< (toi.endState_stem.head(3) - ps).norm()<<endl;
-            cout<<"d2:"<< (toi.endState_main.head(3) - toi.endState_stem.head(3)).norm()<<endl;
-            cout<<"plan cost:"<<ros::WallTime::now().toSec() - cur_t<<endl;
-            // getchar();
-            // if(EROI_.EROI_[target_f_id_].f_state_ != 1){
-            //     cout<<"f:"<<target_f_id_<<"  vp:"<<int(target_v_id_)<<endl;
-            //     getchar();
-            // }
-            return true;
-        }
-        else{
-            ROS_WARN("opt failed");
-            return false;    
-        }
-    }
-    else if(traj_type_ == 2){
-        return false;
-    }
-    else{
-        ROS_WARN("unknown traj type");
-        return false;
-    }
-    
-}
-
-// bool SingleExp::GoHome(){
-
-// }
 
 int SingleExp::ViewPointsCheck(const double &t){
     if(target_f_id_ == -1 || target_v_id_ == -1) return 0;
@@ -825,7 +657,8 @@ int SingleExp::ViewPointsCheck(const double &t){
     Eigen::Vector4d tar_pose;
     if(!EROI_.GetVp(target_f_id_, target_v_id_, tar_pose)) {
         cout<<"cant get vp:"<<target_f_id_<<"  "<<target_v_id_<<endl;
-        cout<<"eroi state:"<<int(EROI_.EROI_[target_f_id_].f_state_)<<"  vp state:"<<int(EROI_.EROI_[target_f_id_].local_vps_[target_v_id_])<<endl;
+        target_f_id_ = -1;
+        target_v_id_ = -1;
         return 1;
     }
     double dp, dyaw;
@@ -833,10 +666,17 @@ int SingleExp::ViewPointsCheck(const double &t){
     dp = (tar_pose.head(3) - p_).norm();
     if((dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25) || !EROI_.StrongCheckViewpoint(target_f_id_, target_v_id_, true)){
         cout<<"too close:"<<(dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25)<<endl;
-        if(target_f_id_ >= 0 && target_f_id_ < EROI_.EROI_.size() && 0 <= target_v_id_ && target_v_id_ < EROI_.EROI_[target_f_id_].local_vps_.size())
+        if(target_f_id_ >= 0 &&
+           static_cast<size_t>(target_f_id_) < EROI_.EROI_.size() &&
+           target_v_id_ >= 0 &&
+           static_cast<size_t>(target_v_id_) <
+               EROI_.EROI_[target_f_id_].local_vps_.size()){
             DTG_.RemoveVp(target_f_id_, target_v_id_);
-            cout<<"erase vp:"<<target_f_id_<<"  "<<target_v_id_<<endl;
-            dtg_flag_ = false;
+        }
+        cout<<"erase vp:"<<target_f_id_<<"  "<<target_v_id_<<endl;
+        target_f_id_ = -1;
+        target_v_id_ = -1;
+        dtg_flag_ = false;
         return 1;
     }
 
@@ -854,9 +694,27 @@ void SingleExp::TargetPlanning(const Eigen::Vector4d &p, const Eigen::Vector4d &
     vector<DTGPlus::h_ptr> route_h;
     vector<Eigen::Vector3d> path1;
     double d1;
-    ros::WallTime t1 = ros::WallTime::now();
     if(!DTG_.TspApproxiPlan(ps, route_h, path1, d1)){
         plan_res = 1; // route failed
+        return;
+    }
+
+    if(DTG_.CurrentMacroTargetIsRegionEntry()){
+        if(path1.empty()){
+            plan_res = 1;
+            return;
+        }
+        plan_res = 4;
+        path_norm = path1;
+        if(path_norm.size() >= 2){
+            const Eigen::Vector3d direction =
+                path_norm.back() - path_norm[path_norm.size() - 2];
+            y_norm = direction.head(2).norm() > 1.0e-6
+                ? std::atan2(direction.y(), direction.x()) : p(3);
+        }
+        else{
+            y_norm = p(3);
+        }
         return;
     }
    
@@ -914,7 +772,6 @@ void SingleExp::ReloadMap(const ros::TimerEvent &e){
 
 void SingleExp::UpdateDTG(const ros::TimerEvent &e){
     if(!have_odom_) return;
-    ros::WallTime t1 = ros::WallTime::now();
     if(target_f_id_ != -1){
         uint32_t tfid = target_f_id_;
         EROI_.SampleTargetEroi(tfid);
@@ -927,25 +784,45 @@ void SingleExp::UpdateDTG(const ros::TimerEvent &e){
     DTG_.BfUpdate(p_);
     dtg_flag_ = true;
     EROI_.vp_update_ = false;
-    // double c = (ros::WallTime::now() - t1).toSec();
     ROS_WARN("UpdateDTG!");
-    // cout<<"DTG update time:"<<c<<endl;
 }
 
 void SingleExp::DataStatistic(const ros::TimerEvent &e){
     if(!have_odom_) return;
-    CS_.SetVolume(len_ / (ros::WallTime::now().toSec() - ts_), 2);
-    CS_.SetVolume(len_, 1);
-    struct rusage usage;
-
-    getrusage(RUSAGE_SELF, &usage);
-
-    CS_.SetVolume(usage.ru_maxrss / 1024.0, 6);
+    const double elapsed =
+        ros::WallTime::now().toSec() - ts_;
+    if(stat_){
+        CS_.SetVolume(
+            elapsed > 1.0e-6 ? len_ / elapsed : 0.0, 2);
+        CS_.SetVolume(len_, 1);
+        struct rusage usage;
+        getrusage(RUSAGE_SELF, &usage);
+        CS_.SetVolume(usage.ru_maxrss / 1024.0, 6);
+    }
+    if(!volume_coverage_enabled_ || exploration_finished_ ||
+       total_explorable_volume_ <= 0.0)
+        return;
+    const double explored_volume = BM_.ExploredVolume();
+    const double coverage =
+        explored_volume / total_explorable_volume_;
+    const double now = ros::WallTime::now().toSec();
+    if(std::isfinite(coverage) &&
+       coverage >= volume_coverage_threshold_){
+        if(finish_stable_since_ < 0.0) finish_stable_since_ = now;
+        if(now - finish_stable_since_ >= finish_stable_duration_){
+            exploration_finished_ = true;
+            ROS_WARN(
+                "exploration finished: volume=%.3f coverage=%.6f",
+                explored_volume, coverage);
+        }
+    }
+    else{
+        finish_stable_since_ = -1.0;
+    }
 }
 
 void SingleExp::ForceUpdateEroiDtg(){
     if(!have_odom_) return;
-    ros::WallTime t1 = ros::WallTime::now();
     if(target_f_id_ != -1){
         uint32_t tfid = target_f_id_;
         EROI_.SampleTargetEroi(tfid);
@@ -955,58 +832,16 @@ void SingleExp::ForceUpdateEroiDtg(){
         }
         EROI_.dead_fnodes_.clear();
     }
-    // if(EROI_.single_sample_){
-
-    // }
-    // if(EROI_.EROI_[63904].f_state_ == 2){
-    //     vector<Eigen::Vector3d> debug_pts;
-
-    //     debug_pts.emplace_back(EROI_.EROI_[63905].center_);
-    //     debug_pts.emplace_back(EROI_.EROI_[63904].center_);
-    //     Debug(debug_pts);
-    //     EROI_.DebugFunc();
-    // }
     EROI_.SampleVps();
     EROI_.SampleSingleVpsCallback();
     DTG_.BfUpdate(p_);
 
     ROS_WARN("ForceUpdateEroiDtg!");
-    // double c = (ros::WallTime::now() - t1).toSec();
-    // cout<<"DTG update time1:"<<c<<endl;
-
     dtg_flag_ = true;
     EROI_.vp_update_ = false;
     EROI_.single_sample_ = false;
     EROI_.rough_sample_ = false;
 }
-
-// bool SingleExp::FindShorterPath(){
-
-//     Eigen::Vector3d ps, pe;
-//     double t = max(min(ros::WallTime::now().toSec() + replan_t_ * 0.5, traj_end_t_ - 1e-3), traj_start_t_ + 1e-3);
-//     if(t < traj_start_t_ || t > traj_end_t_) return false;
-//     ps = exc_traj_.getPos(t - traj_start_t_).head(3);
-//     if(traj_type_ == 1){
-//         pe = tar_stem_.head(3);
-//     }
-//     else{
-//         pe = tar_main_.head(3);
-//     }
-//     vector<Eigen::Vector3d> path_temp;
-//     double dist1, dist2;
-//     LRM_.ClearTopo();
-//     if(!LRM_.GetPath(ps, pe, path_temp, dist1)){
-//         return false;
-//     }
-//     ps = p_;
-//     if(!LRM_.GetPath(ps, pe, path_temp, dist2)){
-//         return false;
-//     }
-//     if(dist1 / TrajOpt_.upboundVec_[0] > dist2 / TrajOpt_.upboundVec_[0] + replan_t_ * 0.5){
-//         return true;
-//     }
-//     return false;
-// }
 
 void SingleExp::ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
     const nav_msgs::OdometryConstPtr& odom){
@@ -1014,30 +849,21 @@ void SingleExp::ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
 
     if(tc - last_map_update_t_ < update_interval_ || !have_odom_) return;
     last_map_update_t_ = tc; 
-    ros::WallTime t1 = ros::WallTime::now();
 
     BM_.OdomCallback(odom);
     BM_.CastInsertImg(img);
-    // BM_.InsertImg(img);
-    // BM_->VisTotalMap();
-    // BM_->ChangePtsDebug();
-    // have_odom_ = true;
-    // p_(0) = odom->pose.pose.position.x;
-    // p_(1) = odom->pose.pose.position.y;
-    // p_(2) = odom->pose.pose.position.z;
     if(!BM_.changed_pts_.empty()){
         vector<Eigen::Vector3d> new_free_nodes;
         LRM_.SetNodeStatesBf(new_free_nodes);
         EROI_.UpdateFrontier(BM_.newly_register_idx_);
+        DTG_.NotifyFrontierGainChanges(
+            EROI_.updated_frontier_ids_);
         EROI_.LoadNewFeasibleLrmVox(new_free_nodes);
         EROI_.Robot_pos_ = p_;
         for(auto &f : EROI_.dead_fnodes_){
             DTG_.EraseFnodeFromGraph(f.first, f.second);
         }
         EROI_.dead_fnodes_.clear();
-        // ROS_WARN("check1!");
-        // LRM_->CheckThorough();
-        // new_free_nodes_.clear();
         BM_.changed_pts_.clear();
     }
     Eigen::Vector4d cur_pose(p_(0), p_(1), p_(2), yaw_);
@@ -1047,39 +873,38 @@ void SingleExp::ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
         EROI_.RemoveVp(i.first, i.second, false);
         DTG_.EraseFnodeFromGraph(i.first, i.second);
     }
-    // ROS_WARN("map update!");
-    // cout<<"vel mean:"<<len_ / (ros::WallTime::now().toSec() - ts_)<<endl;
-    // cout<<"len:"<<len_<<endl;
-    // cout<<"t:"<<ros::WallTime::now().toSec() - ts_<<endl;
-    // double c = (ros::WallTime::now() - t1).toSec();
-
-    // cout<<"DTG update time1:"<<c<<endl;
-
-}
-
-void SingleExp::PCLOdomCallback(const sensor_msgs::PointCloud2ConstPtr& pcl,
-    const nav_msgs::OdometryConstPtr& odom){
-
 }
 
 void SingleExp::BodyOdomCallback(const nav_msgs::OdometryConstPtr& odom){
     Quaterniond qua;
+    const Eigen::Vector3d new_position(
+        odom->pose.pose.position.x,
+        odom->pose.pose.position.y,
+        odom->pose.pose.position.z);
+    if(!new_position.allFinite()){
+        ROS_WARN_THROTTLE(
+            1.0, "discarding non-finite odometry position");
+        return;
+    }
+    qua.x() = odom->pose.pose.orientation.x;
+    qua.y() = odom->pose.pose.orientation.y;
+    qua.z() = odom->pose.pose.orientation.z;
+    qua.w() = odom->pose.pose.orientation.w;
+    if(!qua.coeffs().allFinite() || qua.norm() < 1.0e-6){
+        ROS_WARN_THROTTLE(
+            1.0, "discarding invalid odometry orientation");
+        return;
+    }
+    qua.normalize();
     robot_pose_.setZero();
     if(have_odom_){
-        len_ += sqrt(pow(p_(0) - odom->pose.pose.position.x, 2) + pow(p_(1) - odom->pose.pose.position.y, 2) + pow(p_(2) - odom->pose.pose.position.z, 2));
+        len_ += (p_ - new_position).norm();
     }
     else{
         ts_ = ros::WallTime::now().toSec();
     }
     have_odom_ = true;
-    qua.x() = odom->pose.pose.orientation.x;
-    qua.y() = odom->pose.pose.orientation.y;
-    qua.z() = odom->pose.pose.orientation.z;
-    qua.w() = odom->pose.pose.orientation.w;
-
-    p_(0) = odom->pose.pose.position.x;
-    p_(1) = odom->pose.pose.position.y;
-    p_(2) = odom->pose.pose.position.z;
+    p_ = new_position;
     
     robot_pose_.block(0, 0, 3, 3) = qua.toRotationMatrix();
     robot_pose_.block(0, 3, 3, 1) = p_;
@@ -1087,6 +912,11 @@ void SingleExp::BodyOdomCallback(const nav_msgs::OdometryConstPtr& odom){
     v_(0) = odom->twist.twist.linear.x;
     v_(1) = odom->twist.twist.linear.y;
     v_(2) = odom->twist.twist.linear.z;
+    if(!v_.allFinite()){
+        ROS_WARN_THROTTLE(
+            1.0, "discarding non-finite odometry velocity");
+        v_.setZero();
+    }
     // if(v_.norm() > 5.0) ROS_ERROR("large v!");//debug
     v_ = qua.toRotationMatrix() * v_;
     yaw_ = atan2(qua.matrix()(1, 0), qua.matrix()(0, 0));
@@ -1303,15 +1133,4 @@ void SingleExp::Debug(vector<Eigen::Vector3d> &pts){
         mk.points.push_back(pt);
     }
     debug_pub_.publish(mk);
-}
-
-
-void SingleExp::StopDebugFunc(){
-    vector<Eigen::Vector3d> debug_pts;
-    cout<<"EROI_.EROI_:"<<EROI_.EROI_.size()<<endl;
-    cout<<"center:"<<EROI_.EROI_[63905].center_.transpose()<<endl;
-    // EROI_.DebugFunc();
-    debug_pts.emplace_back(EROI_.EROI_[63905].center_);
-    debug_pts.emplace_back(EROI_.EROI_[63904].center_);
-    Debug(debug_pts);
 }

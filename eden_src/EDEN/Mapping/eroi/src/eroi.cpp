@@ -206,6 +206,7 @@ void EroiGrid::GetLocalValidVps(vector<pair<uint32_t, uint8_t>> &erois, vector<p
                     // ROS_WARN("GetLocalValidVps2");
                     if(idx >= EROI_.size()) {
                         StopageDebug("GetLocalValidVps idx >= EROI_.size()");
+                        continue;
                     }
                     // if(i >= EROI_[idx].local_vps_.size()) {
                     //     cout<<"i:"<<i<<endl;
@@ -214,7 +215,8 @@ void EroiGrid::GetLocalValidVps(vector<pair<uint32_t, uint8_t>> &erois, vector<p
                     //     cout<<"x:"<<x<<" y:"<<y<<" z:"<<z<<endl;
                     //     StopageDebug("GetLocalValidVps i >= EROI_[idx].local_vps_.size()");
                     // }
-                    if(EROI_[idx].local_vps_[i] != 1) continue;
+                    if(i >= EROI_[idx].local_vps_.size() ||
+                       EROI_[idx].local_vps_[i] != 1) continue;
                     // ROS_WARN("GetLocalValidVps2.1");
                     Eigen::Vector3d vp_pos = EROI_[idx].center_ + vps_[i].head(3);
                     // ROS_WARN("GetLocalValidVps2.2");
@@ -225,10 +227,14 @@ void EroiGrid::GetLocalValidVps(vector<pair<uint32_t, uint8_t>> &erois, vector<p
                     auto n = LRM_->GlobalPos2LocalNode(vp_pos);
                     // ROS_WARN("GetLocalValidVps4");
 
-                    if(n->root_id_ == 0) continue;
+                    if(n == nullptr || n == LRM_->Outnode_ ||
+                       n->root_id_ == 0) continue;
                     for(int j = 0; j < rnum; j++){
-                        if(j + s_idx >= fvs.size()) {
+                        if(j + s_idx >= fvs.size() ||
+                           j + s_idx >= root_ids.size() ||
+                           j + s_idx >= distances.size()) {
                             StopageDebug("GetLocalValidVps j + s_idx >= fvs.size()");
+                            continue;
                         }
                         if(root_ids[j+s_idx] == n->root_id_){
                             if(distances[j+s_idx] > n->path_g_){
@@ -620,6 +626,7 @@ void EroiGrid::SampleSingleVpsCallback(const ros::TimerEvent &e){
 void EroiGrid::UpdateFrontier(const vector<Eigen::Vector3d> &pts){
     int idx;
     list<int> idx_list;
+    updated_frontier_ids_.clear();
     for(auto &p : pts){
         if(!InsideExpMap(p)) continue;;
         idx = Pos2Idx(p);
@@ -634,6 +641,8 @@ void EroiGrid::UpdateFrontier(const vector<Eigen::Vector3d> &pts){
     }
 
     for(auto &it_idx : idx_list){
+        updated_frontier_ids_.push_back(
+            static_cast<uint32_t>(it_idx));
         EROI_[it_idx].flags_ &= 254;
         if(EROI_[it_idx].f_state_ == 0) {
             EROI_[it_idx].f_state_ = 1;
@@ -1173,7 +1182,6 @@ bool EroiGrid::StrongCheckViewpointDebug(const int &f_id, const int &v_id, const
     }
     Debug(debug_pts);
     cout<<"gain:"<<gain<<endl;
-    getchar();
     if(gain < vp_thresh_) {
         return false;
     }
@@ -1244,7 +1252,6 @@ void EroiGrid::DebugFunc(){
 
         fov_poses.emplace_back(vp);
         VisVps(fov_poses);
-        getchar();
     }
 
 }

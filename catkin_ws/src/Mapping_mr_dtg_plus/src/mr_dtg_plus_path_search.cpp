@@ -752,7 +752,7 @@ void MultiDtgPlus::Prim(Eigen::MatrixXd &dist_mat, vector<int> &parent, vector<v
     for(int i = 1; i < n; i++){
         if(nodes[i]->parent_ == NULL){
             parent[i] = -1;
-            StopageDebug("Prim parent == NULL");
+            ROS_ERROR("Prim produced a disconnected node");
         }
         else{
             parent[i] = nodes[i]->parent_->id_;
@@ -811,13 +811,8 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
 
     auto frontier_is_effective = [&](uint32_t fid){
         if(EROI_ == nullptr || fid >= EROI_->EROI_.size() ||
-           EROI_->EROI_[fid].f_state_ != 1U ||
-           static_cast<double>(EROI_->EROI_[fid].unknown_num_) <=
-               spectral_exec_config_.frontier_expected_gain_eps) return false;
-        const auto runtime = frontier_runtime_.find(fid);
-        return runtime == frontier_runtime_.end() ||
-            (runtime->second.state != FrontierState::QUARANTINED &&
-             runtime->second.state != FrontierState::DEAD_FRONTIER);
+           EROI_->EROI_[fid].f_state_ != 1U) return false;
+        return true;
     };
     auto target_is_effective = [&](const pair<uint32_t, uint8_t> &target){
         if(target.first == std::numeric_limits<uint32_t>::max() ||
@@ -907,9 +902,7 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
                         not_connected_vps.emplace_back(hfe);
                         double dist = d1 + hfe->length_;
 
-                        gain1 = GetGainExp1(ps, vp, vs3, dist) *
-                            SpectralGainMultiplier(
-                                ResolveSpectralCandidateH(hfe, vp.head(3)), dist);
+                        gain1 = GetGainExp1(ps, vp, vs3, dist);
 
                         if(gain1 > best_gain){
 
@@ -962,9 +955,8 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
                     }
 
 
-                    gain1 = GetGainExp1(ps, vp, vs3, lrn->path_g_ ) * amp *
-                        SpectralGainMultiplier(
-                            ResolveSpectralCandidateH(hfe, vp_pos), lrn->path_g_);
+                    gain1 = GetGainExp1(
+                        ps, vp, vs3, lrn->path_g_) * amp;
                     // if(gain1 == 0){
                     //     gain1 = GetGainExp1Debug(ps, vp, vs3, lrn->path_g_ );
                     //     cout<<"f v:"<<int(fid1)<<" "<<int(vp1)<<endl;
@@ -997,10 +989,10 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
                             if(!frontier_is_effective(static_cast<uint32_t>(fid2))) continue;
                             Eigen::Vector3d vp2_pos = EROI_->vps_[sec_vp.first].head(3) + EROI_->EROI_[fid2].center_;
                             
-                            gain2 = GetGainExp2(ps, vp, vs3, lrn->path_g_, vp2_pos/*eroi.center_*/, arc, vm, EROI_->vps_[sec_vp.first](3)) * amp *
-                                SpectralGainMultiplier(
-                                    ResolveSpectralCandidateH(nullptr, vp2_pos),
-                                    lrn->path_g_ + arc);
+                            gain2 = GetGainExp2(
+                                ps, vp, vs3, lrn->path_g_,
+                                vp2_pos/*eroi.center_*/, arc, vm,
+                                EROI_->vps_[sec_vp.first](3)) * amp;
                             // if((eroi.center_ + EROI_->vps_[vp1].head(3) - vp2_pos).norm() < 1.5){
                             //     cout<<"i2:"<<i2<<endl;
                             //     cout<<"vp1:"<<vp1<<endl;
@@ -1042,9 +1034,7 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
             not_connected_vps.emplace_back(hfe);
             double dist = d1 + hfe->length_;
 
-            gain1 = GetGainExp1(ps, vp, vs3, dist) *
-                SpectralGainMultiplier(
-                    ResolveSpectralCandidateH(hfe, vp_pos), dist);
+            gain1 = GetGainExp1(ps, vp, vs3, dist);
 
             if(gain1 > best_gain){
                 best_gain = gain1;
@@ -1192,9 +1182,7 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
                 vp.head(3) += EROI_->EROI_[v.first].center_;
                 vp_pos = vp.head(3);
                 lrn = LRM_->GlobalPos2LocalNode(vp_pos);
-                gain_sec = exp(-lambda_e_ * lrn->path_g_ / v_max_) *
-                    SpectralGainMultiplier(
-                        ResolveSpectralCandidateH(nullptr, vp_pos), lrn->path_g_);
+                gain_sec = exp(-lambda_e_ * lrn->path_g_ / v_max_);
                 if(sbest_gain < gain_sec){
                     sbest_gain = gain_sec;
                     sbest_tar1 = v;
@@ -1221,8 +1209,8 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
                    hfe->tail_n_ == nullptr ||
                    !std::isfinite(hfe->length_) || hfe->length_ >= 999998.0 ||
                    !frontier_is_effective(hfe->tail_n_->fid_)) continue;
-                gain_sec = exp(-lambda_e_ * (h_dist + hfe->length_) / v_max_) *
-                    SpectralGainMultiplier(hfe->head_n_, h_dist + hfe->length_);
+                gain_sec =
+                    exp(-lambda_e_ * (h_dist + hfe->length_) / v_max_);
                 // if(!LRM_->InsideMap(hfe->path_.back())) gain_sec = 9999999;
                 if(sbest_gain < gain_sec){
                     path_2_best_h = path_2_h;
@@ -1284,8 +1272,8 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
                     const pair<uint32_t, uint8_t> candidate(
                         hfe->tail_n_->fid_, hfe->tail_n_->vid_);
                     if(!target_is_effective(candidate)) continue;
-                    gain_sec = exp(-lambda_e_ * (h_dist + hfe->length_) / v_max_) *
-                        SpectralGainMultiplier(hfe->head_n_, h_dist + hfe->length_);
+                    gain_sec =
+                        exp(-lambda_e_ * (h_dist + hfe->length_) / v_max_);
                     if(sbest_gain < gain_sec){
                         sbest_gain = gain_sec;
                         sbest_tar1 = candidate;
@@ -1375,11 +1363,5 @@ void MultiDtgPlus::FindFastExpTarget( const vector<h_ptr> &route, const Eigen::V
 
     }
 
-    RecordSelectedFrontier(best_tar1.first);
-    const auto selected_runtime = frontier_runtime_.find(best_tar1.first);
-    if(selected_runtime != frontier_runtime_.end() &&
-       selected_runtime->second.state == FrontierState::QUARANTINED){
-        plan_res = 1;
-    }
     return;
 }

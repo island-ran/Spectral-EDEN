@@ -17,5 +17,19 @@ cs_add_executable(${PROJECT_NAME}_node src/eden_node.cpp)
 
 target_link_libraries(${PROJECT_NAME}_node
         ${catkin_LIBRARIES} ${PROJECT_NAME}_lib)
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(eden_safety_test
+    test/eden_safety_test.cpp)
+  if(TARGET eden_safety_test)
+    target_link_libraries(eden_safety_test
+      ${catkin_LIBRARIES}
+      gtest_main)
+  endif()
+endif()
+
+install(DIRECTORY resource
+        DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+
 cs_install() 
 cs_export()

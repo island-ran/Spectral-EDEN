@@ -14,12 +14,17 @@ include_directories(
 cs_add_library(${PROJECT_NAME}
   src/mr_dtg_plus.cpp
   src/mr_dtg_plus_global.cpp
-  src/spectral_router.cpp
-  src/spectral_v2_policy.cpp
-  src/mr_dtg_plus_spectral.cpp
+  src/mr_dtg_plus_eden_baseline.cpp
+  src/mr_dtg_plus_v4_global.cpp
   src/mr_dtg_plus_path_search.cpp
   src/mr_dtg_plus_initialization.cpp
-  src/mr_dtg_plus_target_refine.cpp)
+  src/mr_dtg_plus_target_refine.cpp
+  src/spectral_router.cpp
+  src/spectral_worker.cpp
+  src/committed_target_manager.cpp
+  src/incremental_fiedler.cpp
+  src/nystrom_bisection.cpp
+  src/local_appr.cpp)
 
 ##########
 # TESTS  #
@@ -33,26 +38,34 @@ if(CATKIN_ENABLE_TESTING)
       gtest_main)
   endif()
 
-  catkin_add_gtest(spectral_v2_policy_test
-    test/spectral_v2_policy_test.cpp)
-  if(TARGET spectral_v2_policy_test)
-    target_link_libraries(spectral_v2_policy_test
-      ${PROJECT_NAME}
-      gtest_main)
-  endif()
-
-  catkin_add_gtest(spectral_snapshot_compression_test
-    test/spectral_snapshot_compression_test.cpp)
-  if(TARGET spectral_snapshot_compression_test)
-    target_link_libraries(spectral_snapshot_compression_test
-      ${PROJECT_NAME}
-      gtest_main)
-  endif()
-
   catkin_add_gtest(spectral_iterative_solver_test
     test/spectral_iterative_solver_test.cpp)
   if(TARGET spectral_iterative_solver_test)
     target_link_libraries(spectral_iterative_solver_test
+      ${PROJECT_NAME}
+      gtest_main)
+  endif()
+
+  catkin_add_gtest(committed_target_manager_test
+    test/committed_target_manager_test.cpp)
+  if(TARGET committed_target_manager_test)
+    target_link_libraries(committed_target_manager_test
+      ${PROJECT_NAME}
+      gtest_main)
+  endif()
+
+  catkin_add_gtest(spectral_v4_backends_test
+    test/spectral_v4_backends_test.cpp)
+  if(TARGET spectral_v4_backends_test)
+    target_link_libraries(spectral_v4_backends_test
+      ${PROJECT_NAME}
+      gtest_main)
+  endif()
+
+  catkin_add_gtest(spectral_worker_test
+    test/spectral_worker_test.cpp)
+  if(TARGET spectral_worker_test)
+    target_link_libraries(spectral_worker_test
       ${PROJECT_NAME}
       gtest_main)
   endif()

@@ -23,332 +23,158 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     nh_private.param(ns + "/opt/MaxAcc", a_max_, 0.5);
     nh_private.param(ns + "/opt/YawVel", yv_max_, 0.5);
 
-    int spectral_graph_mode = static_cast<int>(spectral_exec_config_.graph_mode);
-    int spectral_weight_mode = static_cast<int>(spectral_config_.weight_mode);
-    int min_spectral_nodes = static_cast<int>(spectral_config_.min_spectral_nodes);
-    int max_spectral_nodes = static_cast<int>(spectral_config_.max_spectral_nodes);
-    int min_cluster_size = static_cast<int>(spectral_config_.min_cluster_size);
-    int dense_solver_max_nodes = static_cast<int>(spectral_config_.dense_solver_max_nodes);
-    int iterative_max_iterations = static_cast<int>(spectral_config_.iterative_max_iterations);
-    nh_private.param(ns + "/MR_DTG/Spectral/Enable", spectral_exec_config_.enabled, false);
-    nh_private.param(ns + "/MR_DTG/Spectral/FallbackToEOHDT", spectral_exec_config_.fallback_to_eohdt, true);
-    nh_private.param(ns + "/MR_DTG/Spectral/PartitionEnable", spectral_exec_config_.partition_enabled, true);
-    nh_private.param(ns + "/MR_DTG/Spectral/RegionLockEnable", spectral_exec_config_.region_lock_enabled, true);
-    nh_private.param(ns + "/MR_DTG/Spectral/LogDiagnostics", spectral_exec_config_.log_diagnostics, true);
-    nh_private.param(ns + "/MR_DTG/Spectral/GraphMode", spectral_graph_mode, 1);
-    nh_private.param(ns + "/MR_DTG/Spectral/WeightMode", spectral_weight_mode, 0);
-    nh_private.param(ns + "/MR_DTG/Spectral/LengthDecay", spectral_config_.length_decay, 1.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/LengthScaleMultiplier", spectral_config_.length_scale_multiplier, 1.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/ClearanceReference", spectral_config_.clearance_reference, 1.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/ClearancePower", spectral_config_.clearance_power, 1.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/BetweennessWeight", spectral_config_.betweenness_weight, 1.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/MinEdgeWeight", spectral_config_.min_edge_weight, 1.0e-6);
-    nh_private.param(ns + "/MR_DTG/Spectral/MinSpectralNodes", min_spectral_nodes, 3);
-    nh_private.param(ns + "/MR_DTG/Spectral/MaxSpectralNodes", max_spectral_nodes, 200);
-    nh_private.param(ns + "/MR_DTG/Spectral/MinClusterSize", min_cluster_size, 2);
-    nh_private.param(ns + "/MR_DTG/Spectral/MinClusterVolumeFraction", spectral_config_.min_cluster_volume_fraction, 0.05);
-    nh_private.param(ns + "/MR_DTG/Spectral/MaxResidualNorm", spectral_config_.max_residual_norm, 1.0e-8);
-    nh_private.param(ns + "/MR_DTG/Spectral/MinPartitionNodes", spectral_exec_config_.min_partition_nodes, 6);
-    nh_private.param(ns + "/MR_DTG/Spectral/Lambda2Threshold", spectral_exec_config_.lambda2_threshold, 0.15);
-    nh_private.param(ns + "/MR_DTG/Spectral/EigengapThreshold", spectral_exec_config_.eigengap_threshold, 0.02);
-    nh_private.param(ns + "/MR_DTG/Spectral/NcutThreshold", spectral_exec_config_.ncut_threshold, 0.30);
-    nh_private.param(ns + "/MR_DTG/Spectral/Lambda2EmaAlpha", spectral_exec_config_.lambda2_ema_alpha, 0.90);
-    nh_private.param(ns + "/MR_DTG/Spectral/Lambda2Ratio", spectral_exec_config_.lambda2_ratio, 1.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/TriggerPersistence", spectral_exec_config_.trigger_persistence, 2);
-    nh_private.param(ns + "/MR_DTG/Spectral/ReleasePersistence", spectral_exec_config_.release_persistence, 3);
-    nh_private.param(ns + "/MR_DTG/Spectral/RegionDoneCycles", spectral_exec_config_.region_done_cycles, 3);
-    nh_private.param(ns + "/MR_DTG/Spectral/UnreachableConfirmCycles", spectral_exec_config_.unreachable_confirm_cycles, 3);
-    nh_private.param(ns + "/MR_DTG/Spectral/ClearanceBinarySteps", spectral_exec_config_.clearance_binary_steps, 5);
-    nh_private.param(ns + "/MR_DTG/Spectral/ClearanceMaxSamples", spectral_exec_config_.clearance_max_samples, 64);
-    nh_private.param(ns + "/MR_DTG/Spectral/RegionMatchThreshold", spectral_exec_config_.region_match_threshold, 0.30);
-    nh_private.param(ns + "/MR_DTG/Spectral/LabelHysteresis", spectral_exec_config_.label_hysteresis, 0.02);
-    nh_private.param(ns + "/MR_DTG/Spectral/RouteJumpWeight", spectral_exec_config_.route_jump_weight, 1.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/RouteTerminalBias", spectral_exec_config_.route_terminal_bias, 0.25);
-    nh_private.param(ns + "/MR_DTG/Spectral/SpectralViewWeight", spectral_exec_config_.spectral_view_weight, 0.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/CrossRegionWeight", spectral_exec_config_.cross_region_weight, 0.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/TimeBudgetMs", spectral_exec_config_.spectral_time_budget_ms, 10.0);
-    nh_private.param(ns + "/MR_DTG/Spectral/UpdatePeriod", spectral_exec_config_.update_period, 0.20);
+    // ── Global planner mode (startup binary choice) ──
+    std::string planner_mode_str;
+    nh_private.param(ns + "/MR_DTG/GlobalPlanner/mode", planner_mode_str,
+        std::string("spectral_v4"));
 
-    // Spectral-EDEN v2 parameters intentionally coexist with the original
-    // Spectral block so old experiment files remain readable.  V2 values are
-    // loaded last and therefore take precedence when present.
-    nh_private.param(ns + "/MR_DTG/SpectralV2/enabled", spectral_exec_config_.enabled,
-        spectral_exec_config_.enabled);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/async_solve", spectral_exec_config_.async_solve, true);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/corridor_compression",
-        spectral_exec_config_.corridor_compression, true);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/min_spectral_nodes", min_spectral_nodes, 10);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/max_spectral_nodes", max_spectral_nodes, 80);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/dense_solver_max_nodes",
-        dense_solver_max_nodes, 40);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/iterative_max_iterations",
-        iterative_max_iterations, 100);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/iterative_tolerance",
-        spectral_config_.iterative_tolerance, 1.0e-10);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/iterative_shift",
-        spectral_config_.iterative_shift, 1.0e-4);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_knn", spectral_exec_config_.spectral_knn, 5);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_min_update_interval",
-        spectral_exec_config_.spectral_min_update_interval, 0.5);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_max_update_interval",
-        spectral_exec_config_.spectral_max_update_interval, 3.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/dirty_node_changes",
-        spectral_exec_config_.dirty_node_changes, 3);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/dirty_edge_changes",
-        spectral_exec_config_.dirty_edge_changes, 5);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_time_budget_ms",
-        spectral_exec_config_.spectral_time_budget_ms, 5.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/max_spectral_epoch_age",
-        spectral_exec_config_.max_spectral_epoch_age, 2);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_timeout_limit",
-        spectral_exec_config_.spectral_timeout_limit, 3);
-
-    nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_weight_ncut",
-        spectral_exec_config_.confidence_weight_ncut, 0.30);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_weight_eigengap",
-        spectral_exec_config_.confidence_weight_eigengap, 0.25);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_weight_relative_lambda2",
-        spectral_exec_config_.confidence_weight_relative_lambda2, 0.15);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_weight_bottleneck",
-        spectral_exec_config_.confidence_weight_bottleneck, 0.20);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_weight_balance",
-        spectral_exec_config_.confidence_weight_balance, 0.10);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_ncut_soft",
-        spectral_exec_config_.confidence_ncut_soft, 0.60);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_eigengap_soft",
-        spectral_exec_config_.confidence_eigengap_soft, 0.15);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/partition_confidence_on",
-        spectral_exec_config_.partition_confidence_on, 0.70);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/partition_confidence_off",
-        spectral_exec_config_.partition_confidence_off, 0.40);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/partition_on_persistence",
-        spectral_exec_config_.trigger_persistence, 3);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/partition_off_persistence",
-        spectral_exec_config_.release_persistence, 5);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/partition_grace_epochs",
-        spectral_exec_config_.partition_grace_epochs, 8);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/label_hysteresis_ratio",
-        spectral_exec_config_.label_hysteresis, 0.08);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/region_match_threshold",
-        spectral_exec_config_.region_match_threshold, 0.50);
-
-    nh_private.param(ns + "/MR_DTG/SpectralV2/max_route_regret",
-        spectral_exec_config_.max_route_regret, 0.05);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/switch_penalty_base",
-        spectral_exec_config_.switch_penalty_base, 2.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/revisit_penalty_weight",
-        spectral_exec_config_.revisit_penalty_weight, 1.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/neighbor_override_distance",
-        spectral_exec_config_.neighbor_override_distance, 2.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/neighbor_override_margin",
-        spectral_exec_config_.neighbor_override_margin, 0.5);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/lock_debt_decay",
-        spectral_exec_config_.lock_debt_decay, 0.90);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/lock_debt_max",
-        spectral_exec_config_.lock_debt_max, 8.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/recovery_duration",
-        spectral_exec_config_.recovery_duration, 5.0);
-
-    nh_private.param(ns + "/MR_DTG/SpectralV2/late_stage_frontier_count",
-        spectral_exec_config_.late_stage_frontier_count, 6);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/late_stage_reactivate_frontier_count",
-        spectral_exec_config_.late_stage_reactivate_frontier_count, 12);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/late_stage_total_gain",
-        spectral_exec_config_.late_stage_total_gain, 50.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/late_stage_no_cut_epochs",
-        spectral_exec_config_.late_stage_no_cut_epochs, 10);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/frontier_low_gain_cycles",
-        spectral_exec_config_.frontier_low_gain_cycles, 2);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/frontier_actual_gain_eps",
-        spectral_exec_config_.frontier_actual_gain_eps, 10);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/frontier_expected_gain_eps",
-        spectral_exec_config_.frontier_expected_gain_eps, 1.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/frontier_quarantine_time",
-        spectral_exec_config_.frontier_quarantine_time, 5.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/region_done_confirm_cycles",
-        spectral_exec_config_.region_done_cycles, 3);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/region_stall_window",
-        spectral_exec_config_.region_stall_window, 8.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/region_stall_timeout",
-        spectral_exec_config_.region_stall_timeout, 12.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/repeat_target_limit",
-        spectral_exec_config_.repeat_target_limit, 3);
-
-    // ── Spectral-EDEN V4: bounded skeleton + single-target fast path ──
-    nh_private.param(ns + "/MR_DTG/SpectralV41/enabled", spectral_v4_config_.enabled, false);
-    nh_private.param(ns + "/MR_DTG/SpectralV41/log_diagnostics", spectral_v4_config_.log_diagnostics, true);
-    nh_private.param(ns + "/MR_DTG/SpectralV41/skeleton_max_nodes", spectral_v4_config_.skeleton_max_nodes, 48);
-    nh_private.param(ns + "/MR_DTG/SpectralV41/local_frontier_top_k", spectral_v4_config_.local_frontier_top_k, 8);
-    nh_private.param(ns + "/MR_DTG/SpectralV41/target_switch_margin", spectral_v4_config_.target_switch_margin, 0.25);
-    nh_private.param(ns + "/MR_DTG/SpectralV41/min_target_commit_sec", spectral_v4_config_.min_target_commit_sec, 1.0);
-    ROS_WARN("Spectral-EDEN V4 enabled=%d ns=%s", spectral_v4_config_.enabled ? 1 : 0, ns.c_str());
-
-    spectral_exec_config_.graph_mode = spectral_graph_mode == 0
-        ? SpectralGraphMode::ACTIVE_COMPLETE : SpectralGraphMode::SUPPORT_SPARSE;
-    if(spectral_weight_mode <= 0){
-        spectral_config_.weight_mode = SpectralWeightMode::DISTANCE;
+    if(planner_mode_str == "eden"){
+        global_planner_mode_ = GlobalPlannerMode::EDEN_BASELINE;
+        ROS_WARN("[GlobalPlanner] mode=EDEN_BASELINE  ns=%s", ns.c_str());
     }
-    else if(spectral_weight_mode == 1){
-        spectral_config_.weight_mode = SpectralWeightMode::DISTANCE_CLEARANCE;
+    else if(planner_mode_str == "spectral_v4"){
+        global_planner_mode_ = GlobalPlannerMode::SPECTRAL_V4;
+        ROS_WARN("[GlobalPlanner] mode=SPECTRAL_V4  ns=%s", ns.c_str());
     }
     else{
-        spectral_config_.weight_mode = SpectralWeightMode::DISTANCE_CLEARANCE_BETWEENNESS;
+        ROS_FATAL_STREAM("[GlobalPlanner] Unknown mode: " << planner_mode_str
+            << ". Valid modes: eden, spectral_v4");
+        throw std::runtime_error("invalid global planner mode: " + planner_mode_str);
     }
-    spectral_config_.min_spectral_nodes = std::max(3, min_spectral_nodes);
-    spectral_config_.max_spectral_nodes = std::max(0, max_spectral_nodes);
-    spectral_config_.dense_solver_max_nodes = static_cast<size_t>(
-        std::max(3, dense_solver_max_nodes));
-    spectral_config_.iterative_max_iterations = static_cast<size_t>(
-        std::max(1, iterative_max_iterations));
-    spectral_config_.iterative_tolerance = std::max(
-        spectral_config_.numeric_epsilon, spectral_config_.iterative_tolerance);
-    spectral_config_.iterative_shift = std::max(
-        spectral_config_.numeric_epsilon, spectral_config_.iterative_shift);
-    spectral_config_.min_cluster_size = std::max(1, min_cluster_size);
-    spectral_exec_config_.trigger_persistence = std::max(1, spectral_exec_config_.trigger_persistence);
-    spectral_exec_config_.release_persistence = std::max(1, spectral_exec_config_.release_persistence);
-    spectral_exec_config_.region_done_cycles = std::max(1, spectral_exec_config_.region_done_cycles);
-    spectral_exec_config_.unreachable_confirm_cycles = std::max(1, spectral_exec_config_.unreachable_confirm_cycles);
-    spectral_exec_config_.clearance_binary_steps = std::max(1, spectral_exec_config_.clearance_binary_steps);
-    spectral_exec_config_.clearance_max_samples = std::max(2, spectral_exec_config_.clearance_max_samples);
-    spectral_exec_config_.spectral_knn = std::max(1, spectral_exec_config_.spectral_knn);
-    spectral_exec_config_.dirty_node_changes = std::max(1, spectral_exec_config_.dirty_node_changes);
-    spectral_exec_config_.dirty_edge_changes = std::max(1, spectral_exec_config_.dirty_edge_changes);
-    spectral_exec_config_.partition_grace_epochs = std::max(0, spectral_exec_config_.partition_grace_epochs);
-    spectral_exec_config_.max_spectral_epoch_age = std::max(
-        0, spectral_exec_config_.max_spectral_epoch_age);
-    spectral_exec_config_.spectral_timeout_limit = std::max(
-        1, spectral_exec_config_.spectral_timeout_limit);
-    spectral_exec_config_.lambda2_ema_alpha = std::max(0.0,
-        std::min(0.999, spectral_exec_config_.lambda2_ema_alpha));
-    spectral_exec_config_.lambda2_ratio = std::max(0.0, spectral_exec_config_.lambda2_ratio);
-    spectral_exec_config_.region_match_threshold = std::max(0.0,
-        std::min(1.0, spectral_exec_config_.region_match_threshold));
-    spectral_exec_config_.label_hysteresis = std::max(0.0, spectral_exec_config_.label_hysteresis);
-    spectral_exec_config_.route_jump_weight = std::max(0.0, spectral_exec_config_.route_jump_weight);
-    spectral_exec_config_.route_terminal_bias = std::max(0.0, spectral_exec_config_.route_terminal_bias);
-    spectral_exec_config_.spectral_view_weight = std::max(0.0, spectral_exec_config_.spectral_view_weight);
-    spectral_exec_config_.cross_region_weight = std::max(0.0, spectral_exec_config_.cross_region_weight);
-    spectral_exec_config_.spectral_time_budget_ms = std::max(0.0, spectral_exec_config_.spectral_time_budget_ms);
-    spectral_exec_config_.update_period = std::max(0.0, spectral_exec_config_.update_period);
-    spectral_exec_config_.spectral_min_update_interval = std::max(0.0,
-        spectral_exec_config_.spectral_min_update_interval);
-    spectral_exec_config_.spectral_max_update_interval = std::max(
-        spectral_exec_config_.spectral_min_update_interval,
-        spectral_exec_config_.spectral_max_update_interval);
-    spectral_exec_config_.partition_confidence_on = Clamp01(
-        spectral_exec_config_.partition_confidence_on);
-    spectral_exec_config_.partition_confidence_off = Clamp01(
-        spectral_exec_config_.partition_confidence_off);
-    if(spectral_exec_config_.partition_confidence_on <
-       spectral_exec_config_.partition_confidence_off){
-        std::swap(spectral_exec_config_.partition_confidence_on,
-                  spectral_exec_config_.partition_confidence_off);
+
+    // ── Load V4 params (used only by SPECTRAL_V4 mode) ──
+    if(global_planner_mode_ == GlobalPlannerMode::SPECTRAL_V4){
+        nh_private.param(ns + "/MR_DTG/SpectralV4/log_diagnostics", spectral_v4_config_.log_diagnostics, true);
+
+        // Skeleton
+        nh_private.param(ns + "/MR_DTG/SpectralV4/skeleton_max_nodes", spectral_v4_config_.skeleton_max_nodes, 512);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/max_leaf_regions", spectral_v4_config_.max_leaf_regions, 6);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/max_recursive_depth", spectral_v4_config_.max_recursive_depth, 3);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/length_decay", spectral_v4_config_.length_decay, 1.0);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/clearance_reference", spectral_v4_config_.clearance_reference, 1.0);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/clearance_power", spectral_v4_config_.clearance_power, 1.0);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/min_edge_weight", spectral_v4_config_.min_edge_weight, 1.0e-6);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/clearance_binary_steps", spectral_v4_config_.clearance_binary_steps, 5);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/clearance_max_samples", spectral_v4_config_.clearance_max_samples, 64);
+
+        // Incremental Fiedler
+        nh_private.param(ns + "/MR_DTG/SpectralV4/exact_max_nodes", spectral_v4_config_.exact_max_nodes, 48);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/exact_max_iterations", spectral_v4_config_.exact_max_iterations, 12);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/exact_residual_threshold", spectral_v4_config_.exact_residual_threshold, 1.0e-4);
+
+        // Nyström
+        nh_private.param(ns + "/MR_DTG/SpectralV4/landmark_count", spectral_v4_config_.landmark_count, 32);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/landmark_max_count", spectral_v4_config_.landmark_max_count, 48);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/nearest_landmarks_per_node", spectral_v4_config_.nearest_landmarks_per_node, 4);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/nystrom_max_support", spectral_v4_config_.nystrom_max_support, 512);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/nystrom_residual_threshold", spectral_v4_config_.nystrom_residual_threshold, 5.0e-4);
+
+        // Local APPR
+        nh_private.param(ns + "/MR_DTG/SpectralV4/ppr_alpha", spectral_v4_config_.ppr_alpha, 0.15);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/ppr_epsilon", spectral_v4_config_.ppr_epsilon, 1.0e-4);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/ppr_max_pushes", spectral_v4_config_.ppr_max_pushes, 20000);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/ppr_max_support_nodes", spectral_v4_config_.ppr_max_support_nodes, 512);
+
+        // Bisection acceptance
+        nh_private.param(ns + "/MR_DTG/SpectralV4/max_ncut", spectral_v4_config_.max_ncut, 0.30);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/min_balance", spectral_v4_config_.min_balance, 0.20);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/proposal_confirm_versions", spectral_v4_config_.proposal_confirm_versions, 2);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/proposal_jaccard_threshold", spectral_v4_config_.proposal_jaccard_threshold, 0.80);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/max_region_version_lag", spectral_v4_config_.max_region_version_lag, 2);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/region_invalidation_ratio", spectral_v4_config_.region_invalidation_ratio, 0.30);
+
+        // Target commitment
+        nh_private.param(ns + "/MR_DTG/SpectralV4/local_frontier_top_k", spectral_v4_config_.local_frontier_top_k, 8);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/max_adjacent_region_entries", spectral_v4_config_.max_adjacent_region_entries, 2);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/min_target_commit_sec", spectral_v4_config_.min_target_commit_sec, 1.5);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/target_switch_abs_margin_sec", spectral_v4_config_.target_switch_abs_margin_sec, 0.7);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/target_switch_relative_margin", spectral_v4_config_.target_switch_relative_margin, 0.10);
+        nh_private.param(ns + "/MR_DTG/SpectralV4/actual_gain_epsilon", spectral_v4_config_.actual_gain_epsilon, 10.0);
+
+        // Worker
+        nh_private.param(ns + "/MR_DTG/SpectralV4/main_thread_delta_budget_ms", spectral_v4_config_.main_thread_delta_budget_ms, 2.0);
+
+        if(spectral_v4_config_.skeleton_max_nodes < 4 ||
+           spectral_v4_config_.max_leaf_regions < 1 ||
+           spectral_v4_config_.max_recursive_depth < 0 ||
+           spectral_v4_config_.length_decay < 0.0 ||
+           spectral_v4_config_.clearance_reference <= 0.0 ||
+           spectral_v4_config_.clearance_power < 0.0 ||
+           spectral_v4_config_.min_edge_weight <= 0.0 ||
+           spectral_v4_config_.clearance_binary_steps < 0 ||
+           spectral_v4_config_.clearance_max_samples < 2 ||
+           spectral_v4_config_.exact_max_nodes < 3 ||
+           spectral_v4_config_.exact_max_iterations < 1 ||
+           spectral_v4_config_.exact_residual_threshold <= 0.0 ||
+           spectral_v4_config_.landmark_count < 3 ||
+           spectral_v4_config_.landmark_count >
+               spectral_v4_config_.landmark_max_count ||
+           spectral_v4_config_.nearest_landmarks_per_node < 1 ||
+           spectral_v4_config_.nystrom_max_support <
+               spectral_v4_config_.exact_max_nodes ||
+           spectral_v4_config_.nystrom_residual_threshold <= 0.0 ||
+           spectral_v4_config_.ppr_alpha <= 0.0 ||
+           spectral_v4_config_.ppr_alpha >= 1.0 ||
+           spectral_v4_config_.ppr_epsilon <= 0.0 ||
+           spectral_v4_config_.min_balance <= 0.0 ||
+           spectral_v4_config_.min_balance >= 0.5 ||
+           spectral_v4_config_.max_ncut <= 0.0 ||
+           spectral_v4_config_.ppr_max_pushes <= 0 ||
+           spectral_v4_config_.ppr_max_support_nodes < 4 ||
+           spectral_v4_config_.proposal_confirm_versions < 1 ||
+           spectral_v4_config_.proposal_jaccard_threshold < 0.0 ||
+           spectral_v4_config_.proposal_jaccard_threshold > 1.0 ||
+           spectral_v4_config_.max_region_version_lag < 0 ||
+           spectral_v4_config_.region_invalidation_ratio <= 0.0 ||
+           spectral_v4_config_.region_invalidation_ratio > 1.0 ||
+           spectral_v4_config_.local_frontier_top_k < 1 ||
+           spectral_v4_config_.max_adjacent_region_entries < 0 ||
+           spectral_v4_config_.min_target_commit_sec < 0.0 ||
+           spectral_v4_config_.target_switch_abs_margin_sec < 0.0 ||
+           spectral_v4_config_.target_switch_relative_margin < 0.0 ||
+           spectral_v4_config_.actual_gain_epsilon < 0.0 ||
+           spectral_v4_config_.main_thread_delta_budget_ms <= 0.0){
+            ROS_FATAL("[GlobalPlanner] invalid SpectralV4 budget configuration");
+            throw std::runtime_error("invalid SpectralV4 configuration");
+        }
+
+        // Create and start the permanent spectral worker
+        spectral_worker_ = std::make_unique<SpectralWorker>(spectral_v4_config_);
+        spectral_worker_->Start();
+
+        // Initialize V4 state
+        target_manager_ = CommittedTargetManager(spectral_v4_config_);
+        committed_target_ = CommittedTarget();
+        pending_target_ = CommittedTarget();
+        region_snapshot_ = nullptr;
+        v4_bootstrap_pending_ = true;
+        frontier_anchor_index_.clear();
+        last_robot_h_id_ = 0;
+
+        ROS_WARN("[GlobalPlanner] SpectralV4 Worker started  "
+                 "exact_max_nodes=%d  landmark_count=%d  ppr_max_pushes=%d  "
+                 "local_frontier_top_k=%d  min_target_commit=%.1fs  "
+                 "switch_margin=%.2f/%.0f%%  ns=%s",
+                 spectral_v4_config_.exact_max_nodes,
+                 spectral_v4_config_.landmark_count,
+                 spectral_v4_config_.ppr_max_pushes,
+                 spectral_v4_config_.local_frontier_top_k,
+                 spectral_v4_config_.min_target_commit_sec,
+                 spectral_v4_config_.target_switch_abs_margin_sec,
+                 spectral_v4_config_.target_switch_relative_margin * 100.0,
+                 ns.c_str());
     }
-    spectral_exec_config_.max_route_regret = std::max(0.0,
-        spectral_exec_config_.max_route_regret);
-    spectral_exec_config_.switch_penalty_base = std::max(0.0,
-        spectral_exec_config_.switch_penalty_base);
-    spectral_exec_config_.revisit_penalty_weight = std::max(0.0,
-        spectral_exec_config_.revisit_penalty_weight);
-    spectral_exec_config_.neighbor_override_distance = std::max(0.0,
-        spectral_exec_config_.neighbor_override_distance);
-    spectral_exec_config_.neighbor_override_margin = std::max(0.0,
-        spectral_exec_config_.neighbor_override_margin);
-    spectral_exec_config_.lock_debt_decay = Clamp01(spectral_exec_config_.lock_debt_decay);
-    spectral_exec_config_.lock_debt_max = std::max(0.0, spectral_exec_config_.lock_debt_max);
-    spectral_exec_config_.recovery_duration = std::max(0.0,
-        spectral_exec_config_.recovery_duration);
-    spectral_exec_config_.frontier_quarantine_time = std::max(0.0,
-        spectral_exec_config_.frontier_quarantine_time);
-    spectral_exec_config_.frontier_expected_gain_eps = std::max(0.0,
-        spectral_exec_config_.frontier_expected_gain_eps);
-    spectral_exec_config_.region_stall_window = std::max(0.0,
-        spectral_exec_config_.region_stall_window);
-    spectral_exec_config_.region_stall_timeout = std::max(
-        spectral_exec_config_.region_stall_window,
-        spectral_exec_config_.region_stall_timeout);
-    // V2 never uses the legacy hard regional filter.
-    spectral_exec_config_.region_lock_enabled = false;
+    else{
+        // EDEN mode: no worker
+        spectral_worker_ = nullptr;
+        ROS_WARN("[GlobalPlanner] EDEN_BASELINE mode: no SpectralWorker created");
+    }
 
-    partition_confidence_config_.ncut_soft_threshold =
-        spectral_exec_config_.confidence_ncut_soft;
-    partition_confidence_config_.eigengap_soft_threshold =
-        spectral_exec_config_.confidence_eigengap_soft;
-    partition_confidence_config_.weight_ncut =
-        spectral_exec_config_.confidence_weight_ncut;
-    partition_confidence_config_.weight_eigengap =
-        spectral_exec_config_.confidence_weight_eigengap;
-    partition_confidence_config_.weight_relative_lambda2 =
-        spectral_exec_config_.confidence_weight_relative_lambda2;
-    partition_confidence_config_.weight_bottleneck =
-        spectral_exec_config_.confidence_weight_bottleneck;
-    partition_confidence_config_.weight_balance =
-        spectral_exec_config_.confidence_weight_balance;
-    spectral_mode_config_.confidence_on = spectral_exec_config_.partition_confidence_on;
-    spectral_mode_config_.confidence_off = spectral_exec_config_.partition_confidence_off;
-    spectral_mode_config_.on_persistence = spectral_exec_config_.trigger_persistence;
-    spectral_mode_config_.off_persistence = spectral_exec_config_.release_persistence;
-    spectral_mode_config_.grace_epochs = spectral_exec_config_.partition_grace_epochs;
-    spectral_router_.set_config(spectral_config_);
-
+    // ── Common initialization ──
     dtg_version_ = 1;
     frontier_version_ = 1;
-    frontier_epoch_ = 0;
-    spectral_epoch_ = 0;
-    spectral_dirty_ = true;
-    active_region_id_ = -1;
-    next_region_id_ = 0;
-    lambda2_ema_ = 0.0;
-    last_spectral_update_time_ = -1.0;
-    last_spectral_dtg_version_ = 0;
-    last_spectral_frontier_version_ = 0;
-    lambda2_ema_initialized_ = false;
-    partition_valid_ = false;
-    partition_trigger_streak_ = 0;
-    partition_release_streak_ = 0;
-    last_partition_change_ = PartitionChangeType::NONE;
-    last_region_frontier_epoch_ = std::numeric_limits<uint64_t>::max();
-    spectral_job_running_ = false;
-    spectral_graph_eligible_ = true;
-    spectral_fallback_this_cycle_ = false;
-    submitted_spectral_jobs_ = 0;
-    stale_spectral_results_ = 0;
-    timed_out_spectral_results_ = 0;
-    last_submitted_dtg_version_ = 0;
-    last_submitted_frontier_version_ = 0;
-    topology_changes_since_submit_ = 0;
-    frontier_changes_since_submit_ = 0;
-    last_submitted_anchor_count_ = 0;
-    last_raw_spectral_node_count_ = 0;
-    last_compressed_spectral_node_count_ = 0;
-    spectral_mode_state_ = SpectralModeState();
-    soft_route_selected_ = false;
-    lock_debt_ = 0.0;
-    recovery_until_ = 0.0;
-    recovery_reason_ = RecoveryReason::NONE;
-    recovery_requested_ = false;
-    late_stage_active_ = false;
-    no_cut_epochs_ = 0;
-    consecutive_spectral_timeouts_ = 0;
-    spectral_mode_toggle_count_ = 0;
-    recovery_count_ = 0;
-    evaluated_spectral_routes_ = 0;
-    accepted_spectral_routes_ = 0;
-    last_route_feedback_spectral_epoch_ =
-        std::numeric_limits<uint64_t>::max();
-    last_label_change_rate_ = 0.0;
-    selected_frontier_id_ = std::numeric_limits<uint32_t>::max();
-    const double now_wall = ros::WallTime::now().toSec();
-    last_frontier_progress_time_ = now_wall;
-    last_region_progress_time_ = now_wall;
-    watchdog_region_id_ = -1;
-    watchdog_blocking_frontiers_ = 0;
-    watchdog_unknown_gain_ = 0.0;
-    frontier_reassignment_count_ = 0;
-    repeated_target_count_ = 0;
     global_plan_diagnostics_ = GlobalPlanDiagnostics();
-    
+
     origin_ = LRM_->origin_;
     vox_scl_ = LRM_->blockscale_;
     map_upbd_ = LRM_->map_upbd_;
@@ -356,11 +182,8 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     vox_num_ = LRM_->block_num_;
     cur_hid_ = uav_id_;
     cout<<"cur_hid_ 0:"<<cur_hid_<<endl;
-    // cout<<"uav_id_ :"<<uav_id_<<endl;
-    // cout<<"uav_id_ :"<<uav_id_<<endl;
     if(drone_num_ > 1){
         use_swarm_ = true;
-        // swarm_timer_ = nh.createTimer(ros::Duration(SDM_->local_comm_intv_), &MultiDtgPlus::DTGCommunicationCallback, this);
     }
     topo_pub_ = nh.advertise<visualization_msgs::MarkerArray>(ns + "/MR_DTG/Graph", 10);
     debug_pub_ = nh.advertise<visualization_msgs::Marker>(ns + "/MR_DTG/Debug", 10);
@@ -375,12 +198,12 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     }
     H_depot_.resize(vox_num_(0) * vox_num_(1) * vox_num_(2));
     F_depot_.resize(vox_num_(0) * vox_num_(1) * vox_num_(2));
-    
+
 
     time_t now = time(0);
     std::string Time_ = ctime(&now);
     tm* t=localtime(&now);
     string path = "/home/charliedog/rosprojects/DoomSea/debug/"+to_string(t->tm_year+1900)+"_"+to_string(t->tm_mon+1)+"_"+to_string(t->tm_mday)
     +"_"+to_string(t->tm_hour)+"_"+to_string(t->tm_min)+"_"+to_string(t->tm_sec);
-    if(debug_plan_) debug_f_.open(path+"_dtg_debug"+".txt", std::ios::out); 
+    if(debug_plan_) debug_f_.open(path+"_dtg_debug"+".txt", std::ios::out);
 }

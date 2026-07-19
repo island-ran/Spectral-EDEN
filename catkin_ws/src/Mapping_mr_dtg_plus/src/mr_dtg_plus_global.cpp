@@ -19,106 +19,77 @@ uint64_t MultiDtgPlus::HPairKey(const uint32_t h1, const uint32_t h2){
 
 void MultiDtgPlus::MarkTopologyChanged(){
     ++dtg_version_;
-    ++topology_changes_since_submit_;
-    spectral_dirty_ = true;
-    // A path is valid only for the exact H-H graph on which it was found.
-    // Clearing here also bounds memory after long exploration runs.
     h_dist_map_.clear();
 }
 
 void MultiDtgPlus::MarkFrontierChanged(){
     ++frontier_version_;
-    ++frontier_changes_since_submit_;
-    spectral_dirty_ = true;
 }
 
-bool MultiDtgPlus::HasPendingRegions() const{
-    for(const auto &h : H_list_){
-        if(HasEffectiveFrontier(h, -1)) return true;
+bool MultiDtgPlus::HasEffectiveFrontier(
+    const h_ptr &h, int region_id) const{
+    (void)region_id;
+    if(h == nullptr || EROI_ == nullptr) return false;
+    for(const hfe_ptr &edge : h->hf_edges_){
+        if(edge == nullptr || edge->tail_n_ == nullptr ||
+           !std::isfinite(edge->length_) ||
+           edge->length_ >= kBlockedEdgeDistance) continue;
+        const uint32_t frontier_id = edge->tail_n_->fid_;
+        const uint8_t viewpoint_id = edge->tail_n_->vid_;
+        if(frontier_id >= EROI_->EROI_.size()) continue;
+        const auto &frontier = EROI_->EROI_[frontier_id];
+        if(frontier.f_state_ == 1U &&
+           viewpoint_id < frontier.local_vps_.size() &&
+           frontier.local_vps_[viewpoint_id] == 1U){
+            return true;
+        }
     }
     return false;
 }
 
 void MultiDtgPlus::PublishGlobalPlanDiagnostics(){
-    if(!spectral_exec_config_.log_diagnostics) return;
+    if(global_planner_mode_ == GlobalPlannerMode::SPECTRAL_V4 &&
+       !spectral_v4_config_.log_diagnostics) return;
 
     std_msgs::Float64MultiArray message;
     message.layout.dim.resize(1);
     message.layout.dim[0].label =
-        "stamp,status,method,fallback,dtg_version,frontier_version,spectral_epoch,"
-        "lambda2,lambda3,eigengap23,ncut,residual,solve_ms,partition_valid,"
-        "active_region,partition_change,active_anchors,route_size,spectral_mode,"
-        "route_decision,recovery_reason,partition_confidence,q_ncut,q_eigengap,"
-        "q_relative_lambda2,q_bottleneck,q_balance,baseline_path,spectral_path,"
-        "selected_path,baseline_combined,spectral_combined,route_regret,"
-        "switch_penalty,lock_debt,baseline_switches,spectral_switches,"
-        "effective_frontiers,quarantined_frontiers,raw_spectral_nodes,"
-        "compressed_spectral_nodes,submitted_jobs,stale_results,timeout_results";
-    message.layout.dim[0].label +=
-        ",mode_toggles,recovery_count,frontier_reassignments,repeated_targets,"
-        "label_change_rate,spectral_route_utilization,solver_type,"
-        "solver_iterations,solver_warm_start";
+        "stamp,status,method,dtg_version,frontier_version,active_anchors,"
+        "route_size,selected_path,planner_mode,v4_backend,"
+        "worker_graph_version,region_state_version,committed_target_id,"
+        "ncut,balance,residual,truncated,graph_delta_ms,planning_ms";
+    const double ncut = region_snapshot_ == nullptr
+        ? std::numeric_limits<double>::quiet_NaN() : region_snapshot_->ncut;
+    const double balance = region_snapshot_ == nullptr
+        ? 0.0 : region_snapshot_->balance;
+    const double residual = region_snapshot_ == nullptr
+        ? std::numeric_limits<double>::quiet_NaN() :
+          region_snapshot_->residual;
     message.data = {
         ros::WallTime::now().toSec(),
         static_cast<double>(global_plan_diagnostics_.status),
         static_cast<double>(global_plan_diagnostics_.method),
-        global_plan_diagnostics_.used_fallback ? 1.0 : 0.0,
         static_cast<double>(global_plan_diagnostics_.dtg_version),
         static_cast<double>(global_plan_diagnostics_.frontier_version),
-        static_cast<double>(global_plan_diagnostics_.spectral_epoch),
-        global_plan_diagnostics_.lambda2,
-        global_plan_diagnostics_.lambda3,
-        global_plan_diagnostics_.eigengap_23,
-        global_plan_diagnostics_.ncut,
-        global_plan_diagnostics_.residual_norm,
-        global_plan_diagnostics_.spectral_solve_ms,
-        global_plan_diagnostics_.partition_valid ? 1.0 : 0.0,
-        static_cast<double>(global_plan_diagnostics_.active_region_id),
-        static_cast<double>(global_plan_diagnostics_.partition_change),
         static_cast<double>(global_plan_diagnostics_.active_anchor_count),
         static_cast<double>(global_plan_diagnostics_.route_size),
-        static_cast<double>(global_plan_diagnostics_.spectral_mode),
-        static_cast<double>(global_plan_diagnostics_.route_decision),
-        static_cast<double>(global_plan_diagnostics_.recovery_reason),
-        global_plan_diagnostics_.partition_confidence,
-        global_plan_diagnostics_.confidence_ncut,
-        global_plan_diagnostics_.confidence_eigengap,
-        global_plan_diagnostics_.confidence_relative_lambda2,
-        global_plan_diagnostics_.confidence_bottleneck,
-        global_plan_diagnostics_.confidence_balance,
-        global_plan_diagnostics_.baseline_path_cost,
-        global_plan_diagnostics_.spectral_path_cost,
         global_plan_diagnostics_.selected_path_cost,
-        global_plan_diagnostics_.baseline_combined_cost,
-        global_plan_diagnostics_.spectral_combined_cost,
-        global_plan_diagnostics_.route_regret,
-        global_plan_diagnostics_.dynamic_switch_penalty,
-        global_plan_diagnostics_.lock_debt,
-        static_cast<double>(global_plan_diagnostics_.baseline_switches),
-        static_cast<double>(global_plan_diagnostics_.spectral_switches),
-        static_cast<double>(global_plan_diagnostics_.effective_frontier_count),
-        static_cast<double>(global_plan_diagnostics_.quarantined_frontier_count),
-        static_cast<double>(global_plan_diagnostics_.raw_spectral_nodes),
-        static_cast<double>(global_plan_diagnostics_.compressed_spectral_nodes),
-        static_cast<double>(global_plan_diagnostics_.submitted_spectral_jobs),
-        static_cast<double>(global_plan_diagnostics_.stale_spectral_results),
-        static_cast<double>(global_plan_diagnostics_.timed_out_spectral_results),
-        static_cast<double>(global_plan_diagnostics_.spectral_mode_toggles),
-        static_cast<double>(global_plan_diagnostics_.recovery_count),
-        static_cast<double>(global_plan_diagnostics_.frontier_reassignments),
-        static_cast<double>(global_plan_diagnostics_.repeated_targets),
-        global_plan_diagnostics_.label_change_rate,
-        global_plan_diagnostics_.spectral_route_utilization,
-        static_cast<double>(global_plan_diagnostics_.spectral_solver_type),
-        static_cast<double>(global_plan_diagnostics_.spectral_solver_iterations),
-        global_plan_diagnostics_.spectral_warm_start_used ? 1.0 : 0.0};
+        static_cast<double>(global_plan_diagnostics_.planner_mode),
+        static_cast<double>(global_plan_diagnostics_.v4_backend),
+        static_cast<double>(global_plan_diagnostics_.worker_graph_version),
+        static_cast<double>(global_plan_diagnostics_.region_state_version),
+        static_cast<double>(global_plan_diagnostics_.committed_target_id),
+        ncut,
+        balance,
+        residual,
+        region_snapshot_ != nullptr && region_snapshot_->truncated ? 1.0 : 0.0,
+        global_plan_diagnostics_.graph_delta_ms,
+        global_plan_diagnostics_.planning_ms};
     message.layout.dim[0].size = message.data.size();
     message.layout.dim[0].stride = message.data.size();
     spectral_diag_pub_.publish(message);
 
-    if(global_plan_diagnostics_.used_fallback ||
-       global_plan_diagnostics_.status != GlobalPlanStatus::SUCCESS ||
-       last_partition_change_ != PartitionChangeType::NONE){
+    if(global_plan_diagnostics_.status != GlobalPlanStatus::SUCCESS){
         std_msgs::String event;
         event.data = global_plan_diagnostics_.detail;
         spectral_event_pub_.publish(event);
@@ -135,6 +106,8 @@ bool MultiDtgPlus::HasAnyActiveBoundary() const{
     }
     return false;
 }
+
+// ── Route context collection (shared by EDEN baseline) ──
 
 GlobalPlanStatus MultiDtgPlus::CollectActiveBoundaryRegions(
     const Eigen::Vector3d &ps, GlobalRouteContext &context,
@@ -186,7 +159,10 @@ GlobalPlanStatus MultiDtgPlus::CollectActiveBoundaryRegions(
     for(size_t i = 0; i < context.active_hnodes.size(); ++i){
         context.active_index[context.active_hnodes[i]->id_] = i;
     }
-    return BuildActiveDistanceMatrix(context, populate_missing_pair_distances);
+    if(!populate_missing_pair_distances){
+        return GlobalPlanStatus::SUCCESS;
+    }
+    return BuildActiveDistanceMatrix(context, true);
 }
 
 GlobalPlanStatus MultiDtgPlus::BuildActiveDistanceMatrix(
@@ -199,8 +175,6 @@ GlobalPlanStatus MultiDtgPlus::BuildActiveDistanceMatrix(
     context.distance_matrix = Eigen::MatrixXd::Constant(
         static_cast<Eigen::Index>(n + 1), static_cast<Eigen::Index>(n + 1), 999999.0);
     context.distance_matrix.diagonal().setZero();
-    // Preserve the directed root convention used by the original EOHDT Prim
-    // implementation: root -> region has a cost, region -> root is zero.
     context.distance_matrix.col(0).setZero();
     for(size_t i = 0; i < n; ++i){
         context.distance_matrix(0, static_cast<Eigen::Index>(i + 1)) = context.root_paths[i].first;
@@ -262,16 +236,15 @@ GlobalPlanStatus MultiDtgPlus::BuildPathToFirst(const Eigen::Vector3d &ps,
     return GlobalPlanStatus::SUCCESS;
 }
 
-GlobalPlanStatus MultiDtgPlus::RunEohdtFallback(const Eigen::Vector3d &ps,
+// ── EOHDT fallback (EDEN baseline only) ──
+
+GlobalPlanStatus MultiDtgPlus::BuildOriginalEohdtRoute(const Eigen::Vector3d &ps,
     GlobalRouteContext &context, vector<h_ptr> &route_h,
     vector<Eigen::Vector3d> &path2fh, double &d1){
     route_h.clear();
     path2fh.clear();
     d1 = 0.0;
 
-    // This function is the immutable original-EDEN safety baseline.  It must
-    // always contain every reachable effective anchor; spectral state is not
-    // allowed to filter this set.
     vector<size_t> selected;
     for(size_t i = 0; i < context.active_hnodes.size(); ++i){
         selected.emplace_back(i);
@@ -365,359 +338,34 @@ GlobalPlanStatus MultiDtgPlus::RunEohdtFallback(const Eigen::Vector3d &ps,
     return path_status;
 }
 
+// ── Top-level dispatcher ──
+
 GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     vector<h_ptr> &route_h, vector<Eigen::Vector3d> &path2fh, double &d1){
-    global_plan_diagnostics_ = GlobalPlanDiagnostics();
-    global_plan_diagnostics_.dtg_version = dtg_version_;
-    global_plan_diagnostics_.frontier_version = frontier_version_;
-    global_plan_diagnostics_.active_region_id = active_region_id_;
     route_h.clear();
     path2fh.clear();
     d1 = 0.0;
-    soft_route_selected_ = false;
-    spectral_fallback_this_cycle_ = false;
-    const double now = ros::WallTime::now().toSec();
 
-    UpdateFrontierRuntimeStates();
-    ReassignFrontierOwners();
-
-    auto finish = [&](GlobalPlanStatus result){
-        global_plan_diagnostics_.status = result;
-        global_plan_diagnostics_.active_region_id = active_region_id_;
-        global_plan_diagnostics_.partition_valid = partition_valid_;
-        global_plan_diagnostics_.partition_change = static_cast<int>(last_partition_change_);
-        global_plan_diagnostics_.route_size = route_h.size();
-        global_plan_diagnostics_.spectral_mode =
-            static_cast<int>(spectral_mode_state_.mode);
-        global_plan_diagnostics_.recovery_reason =
-            static_cast<int>(recovery_reason_);
-        global_plan_diagnostics_.partition_confidence =
-            partition_confidence_result_.confidence;
-        global_plan_diagnostics_.confidence_ncut =
-            partition_confidence_result_.q_ncut;
-        global_plan_diagnostics_.confidence_eigengap =
-            partition_confidence_result_.q_eigengap;
-        global_plan_diagnostics_.confidence_relative_lambda2 =
-            partition_confidence_result_.q_relative_lambda2;
-        global_plan_diagnostics_.confidence_bottleneck =
-            partition_confidence_result_.q_bottleneck;
-        global_plan_diagnostics_.confidence_balance =
-            partition_confidence_result_.q_balance;
-        global_plan_diagnostics_.lock_debt = lock_debt_;
-        global_plan_diagnostics_.raw_spectral_nodes = last_raw_spectral_node_count_;
-        global_plan_diagnostics_.compressed_spectral_nodes =
-            last_compressed_spectral_node_count_;
-        global_plan_diagnostics_.submitted_spectral_jobs = submitted_spectral_jobs_;
-        global_plan_diagnostics_.stale_spectral_results = stale_spectral_results_;
-        global_plan_diagnostics_.timed_out_spectral_results =
-            timed_out_spectral_results_;
-        global_plan_diagnostics_.spectral_mode_toggles =
-            spectral_mode_toggle_count_;
-        global_plan_diagnostics_.recovery_count = recovery_count_;
-        global_plan_diagnostics_.frontier_reassignments =
-            frontier_reassignment_count_;
-        global_plan_diagnostics_.repeated_targets = repeated_target_count_;
-        global_plan_diagnostics_.label_change_rate = last_label_change_rate_;
-        global_plan_diagnostics_.spectral_route_utilization =
-            evaluated_spectral_routes_ == 0U ? 0.0 :
-            static_cast<double>(accepted_spectral_routes_) /
-            static_cast<double>(evaluated_spectral_routes_);
-        if(last_spectral_result_.success()){
-            global_plan_diagnostics_.spectral_solver_type = static_cast<int>(
-                last_spectral_result_.diagnostics.solver_type);
-            global_plan_diagnostics_.spectral_solver_iterations =
-                last_spectral_result_.diagnostics.solver_iterations;
-            global_plan_diagnostics_.spectral_warm_start_used =
-                last_spectral_result_.diagnostics.iterative_warm_start_used;
-        }
-        double total_gain = 0.0;
-        global_plan_diagnostics_.effective_frontier_count =
-            EffectiveFrontierCount(&total_gain);
-        global_plan_diagnostics_.quarantined_frontier_count = 0U;
-        for(const auto &frontier : frontier_runtime_){
-            if(frontier.second.state == FrontierState::QUARANTINED){
-                ++global_plan_diagnostics_.quarantined_frontier_count;
-            }
-        }
-        PublishGlobalPlanDiagnostics();
-        last_partition_change_ = PartitionChangeType::NONE;
-        return result;
-    };
-
-    GlobalRouteContext context;
-    GlobalPlanStatus status = CollectActiveBoundaryRegions(
-        ps, context, true);
-    if(status != GlobalPlanStatus::SUCCESS){
-        if(status == GlobalPlanStatus::NO_ACTIVE_FRONTIER && !regions_.empty()){
-            UpdateRegionExecutionState(context);
-            global_plan_diagnostics_.active_region_id = active_region_id_;
-        }
-        global_plan_diagnostics_.detail = "failed to collect reachable active boundary regions";
-        return finish(status);
-    }
-    global_plan_diagnostics_.active_anchor_count = context.active_hnodes.size();
-
-    // ── Original V2/V3 pipeline ──
-    std::string spectral_reason;
-    ConsumeSpectralResult(context, now, spectral_reason);
-    ReassignFrontierOwners();
-    UpdateRegionExecutionState(context);
-    ReassignFrontierOwners();
-    DetectAndHandleRegionStall(now);
-
-    const bool late_stage = IsLateStage(context);
-    if(!spectral_exec_config_.enabled || late_stage ||
-       !spectral_graph_eligible_){
-        UpdateSpectralRuntimeMode(false, false, now);
-    }
-    else if(spectral_mode_state_.mode == SpectralMode::RECOVERY){
-        if(now >= recovery_until_) UpdateSpectralRuntimeMode(true, false, now);
-    }
-    if(NeedSpectralUpdate(context, now)){
-        SubmitSpectralJobAsync(context, now, spectral_reason);
+    if(!ps.allFinite()){
+        global_plan_diagnostics_.status = GlobalPlanStatus::INTERNAL_ERROR;
+        global_plan_diagnostics_.detail = "non-finite robot position";
+        return GlobalPlanStatus::INTERNAL_ERROR;
     }
 
-    if(last_spectral_result_.success()){
-        global_plan_diagnostics_.lambda2 = last_spectral_result_.diagnostics.lambda2;
-        global_plan_diagnostics_.lambda3 = last_spectral_result_.diagnostics.lambda3;
-        global_plan_diagnostics_.eigengap_23 =
-            last_spectral_result_.diagnostics.eigengap_23;
-        global_plan_diagnostics_.ncut = last_spectral_result_.diagnostics.ncut;
-        global_plan_diagnostics_.residual_norm =
-            last_spectral_result_.diagnostics.residual_norm;
-        global_plan_diagnostics_.spectral_solve_ms =
-            last_spectral_result_.diagnostics.total_time_ms;
-    }
-    global_plan_diagnostics_.spectral_epoch = spectral_epoch_;
+    // Log planner mode at start of each cycle
+    global_plan_diagnostics_.planner_mode = static_cast<int>(global_planner_mode_);
 
-    // Safety invariant: build the original EDEN/EOHDT route first on every
-    // cycle.  Every v2 decision below can only replace this successful route.
-    vector<h_ptr> baseline_route;
-    vector<Eigen::Vector3d> baseline_path;
-    double baseline_d1 = 0.0;
-    status = RunEohdtFallback(ps, context, baseline_route,
-                              baseline_path, baseline_d1);
-    if(status != GlobalPlanStatus::SUCCESS){
-        route_h.clear();
-        path2fh.clear();
-        d1 = 0.0;
-        global_plan_diagnostics_.method = GlobalPlanMethod::NONE;
-        global_plan_diagnostics_.detail = "original EOHDT baseline failed";
-        return finish(status);
-    }
-    route_h = baseline_route;
-    path2fh = baseline_path;
-    d1 = baseline_d1;
-    const RouteMetrics baseline_metrics = ComputeRouteMetrics(context,
-                                                               baseline_route);
-    global_plan_diagnostics_.baseline_path_cost = baseline_metrics.path_cost;
-    global_plan_diagnostics_.baseline_switches = baseline_metrics.switch_count;
-    global_plan_diagnostics_.selected_path_cost = baseline_metrics.path_cost;
+    switch(global_planner_mode_){
+    case GlobalPlannerMode::EDEN_BASELINE:
+        return PlanGlobalRouteEden(ps, route_h, path2fh, d1);
 
-    auto decay_lock_debt = [&](){
-        const LockDebtUpdate debt = UpdateLockDebt(lock_debt_,
-            baseline_metrics.path_cost, baseline_metrics.path_cost,
-            {spectral_exec_config_.lock_debt_decay,
-             spectral_exec_config_.lock_debt_max});
-        lock_debt_ = debt.debt;
-    };
-    const uint64_t dtg_age = dtg_version_ >= last_spectral_dtg_version_
-        ? dtg_version_ - last_spectral_dtg_version_
-        : std::numeric_limits<uint64_t>::max();
-    const uint64_t frontier_age = frontier_version_ >= last_spectral_frontier_version_
-        ? frontier_version_ - last_spectral_frontier_version_
-        : std::numeric_limits<uint64_t>::max();
-    const bool stable_partition_fresh = last_spectral_dtg_version_ != 0U &&
-        last_spectral_frontier_version_ != 0U &&
-        std::max(dtg_age, frontier_age) <= static_cast<uint64_t>(
-            spectral_exec_config_.max_spectral_epoch_age);
-    bool route_feedback_due =
-        last_route_feedback_spectral_epoch_ != spectral_epoch_;
-    const bool route_feedback_eligible = spectral_exec_config_.enabled &&
-        !late_stage && spectral_graph_eligible_;
-    auto apply_route_feedback = [&](bool route_acceptable){
-        if(!route_feedback_due) return;
-        UpdateSpectralRuntimeMode(route_feedback_eligible,
-                                  route_acceptable, now);
-        last_route_feedback_spectral_epoch_ = spectral_epoch_;
-        route_feedback_due = false;
-    };
-
-    const bool confidence_supports_evaluation =
-        spectral_mode_state_.mode == SpectralMode::ACTIVE_SOFT ||
-        partition_confidence_result_.confidence >=
-            spectral_exec_config_.partition_confidence_on;
-    const bool route_evaluation_needed =
-        spectral_mode_state_.mode == SpectralMode::ACTIVE_SOFT ||
-        route_feedback_due;
-    const bool can_evaluate_soft_route = spectral_exec_config_.enabled &&
-        !late_stage && spectral_graph_eligible_ &&
-        !spectral_fallback_this_cycle_ &&
-        spectral_mode_state_.mode != SpectralMode::RECOVERY &&
-        stable_spectral_result_.has_valid_cut() &&
-        last_spectral_result_.has_valid_cut() &&
-        stable_partition_fresh && confidence_supports_evaluation &&
-        route_evaluation_needed;
-    if(!can_evaluate_soft_route){
-        apply_route_feedback(false);
-        decay_lock_debt();
-        global_plan_diagnostics_.method = spectral_exec_config_.enabled
-            ? GlobalPlanMethod::EOHDT_FALLBACK
-            : GlobalPlanMethod::EOHDT_DISABLED_SPECTRAL;
-        global_plan_diagnostics_.used_fallback = spectral_exec_config_.enabled;
-        global_plan_diagnostics_.route_decision = static_cast<int>(
-            spectral_mode_state_.mode == SpectralMode::RECOVERY
-                ? SpectralRouteDecision::RECOVERY_BASELINE
-                : (stable_spectral_result_.has_valid_cut()
-                    ? SpectralRouteDecision::MODE_INACTIVE
-                    : SpectralRouteDecision::NO_STABLE_PARTITION));
-        if(!stable_partition_fresh && stable_spectral_result_.has_valid_cut()){
-            global_plan_diagnostics_.detail =
-                "stable spectral partition exceeded version age; used original EOHDT";
-        }
-        else{
-            global_plan_diagnostics_.detail = spectral_reason.empty()
-                ? std::string("Spectral-v2 ") + SpectralModeName(spectral_mode_state_.mode) +
-                    "; used original EOHDT"
-                : spectral_reason + "; used original EOHDT";
-        }
-        return finish(GlobalPlanStatus::SUCCESS);
+    case GlobalPlannerMode::SPECTRAL_V4:
+        return PlanGlobalRouteV4(ps, route_h, path2fh, d1);
     }
 
-    const double return_probability = EstimateReturnProbability(context);
-    const double switch_penalty = ComputeDynamicSwitchPenalty(
-        spectral_exec_config_.switch_penalty_base,
-        partition_confidence_result_.confidence, return_probability);
-    global_plan_diagnostics_.dynamic_switch_penalty = switch_penalty;
-    vector<h_ptr> candidate_route;
-    if(!BuildRegionAwareRoute(context, candidate_route,
-                              switch_penalty, spectral_reason)){
-        apply_route_feedback(false);
-        decay_lock_debt();
-        global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-        global_plan_diagnostics_.used_fallback = true;
-        global_plan_diagnostics_.route_decision = static_cast<int>(
-            SpectralRouteDecision::CANDIDATE_BUILD_FAILED);
-        global_plan_diagnostics_.detail = spectral_reason +
-            "; used original EOHDT";
-        return finish(GlobalPlanStatus::SUCCESS);
-    }
-
-    const RouteMetrics candidate_metrics = ComputeRouteMetrics(context,
-                                                                candidate_route);
-    ++evaluated_spectral_routes_;
-    RouteAcceptanceConfig acceptance;
-    acceptance.max_route_regret = spectral_exec_config_.max_route_regret;
-    acceptance.switch_penalty = switch_penalty;
-    acceptance.revisit_penalty = spectral_exec_config_.revisit_penalty_weight;
-    acceptance.numeric_epsilon = spectral_config_.numeric_epsilon;
-    const RouteDecision decision = EvaluateRegionRoute(
-        baseline_metrics, candidate_metrics, acceptance);
-    global_plan_diagnostics_.spectral_path_cost = candidate_metrics.path_cost;
-    global_plan_diagnostics_.spectral_switches = candidate_metrics.switch_count;
-    global_plan_diagnostics_.baseline_combined_cost =
-        decision.baseline_combined_cost;
-    global_plan_diagnostics_.spectral_combined_cost =
-        decision.candidate_combined_cost;
-    global_plan_diagnostics_.route_regret = decision.path_regret;
-
-    if(!decision.accepted){
-        apply_route_feedback(false);
-        decay_lock_debt();
-        global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-        global_plan_diagnostics_.used_fallback = true;
-        global_plan_diagnostics_.route_decision = static_cast<int>(
-            decision.within_path_regret
-                ? SpectralRouteDecision::COMBINED_COST_REJECTED
-                : SpectralRouteDecision::REGRET_REJECTED);
-        global_plan_diagnostics_.detail = decision.within_path_regret
-            ? "region route did not improve combined cost; used original EOHDT"
-            : "region route rejected by path-regret guard; used original EOHDT";
-        return finish(GlobalPlanStatus::SUCCESS);
-    }
-
-    vector<Eigen::Vector3d> candidate_path;
-    double candidate_d1 = 0.0;
-    const bool candidate_targets_active_region = active_region_id_ >= 0 &&
-        !candidate_route.empty() &&
-        RegionForHnode(candidate_route.front()) == active_region_id_;
-    const GlobalPlanStatus candidate_path_status = BuildPathToFirst(
-        ps, context, candidate_route.front(), candidate_path, candidate_d1);
-    if(candidate_path_status != GlobalPlanStatus::SUCCESS){
-        apply_route_feedback(false);
-        if(candidate_targets_active_region) RecordActiveRegionPathResult(false);
-        decay_lock_debt();
-        global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-        global_plan_diagnostics_.used_fallback = true;
-        global_plan_diagnostics_.route_decision = static_cast<int>(
-            SpectralRouteDecision::CANDIDATE_PATH_FAILED);
-        global_plan_diagnostics_.detail =
-            "region-route first path failed; used original EOHDT";
-        return finish(GlobalPlanStatus::SUCCESS);
-    }
-
-    const bool mode_was_active_before_feedback =
-        spectral_mode_state_.mode == SpectralMode::ACTIVE_SOFT;
-    apply_route_feedback(true);
-    if(!mode_was_active_before_feedback &&
-       spectral_mode_state_.mode == SpectralMode::ACTIVE_SOFT){
-        // Select the persistent active region first; the next cycle evaluates
-        // the candidate with the correct return probability and switch count.
-        UpdateRegionExecutionState(context);
-        ReassignFrontierOwners();
-        decay_lock_debt();
-        global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-        global_plan_diagnostics_.used_fallback = true;
-        global_plan_diagnostics_.route_decision = static_cast<int>(
-            SpectralRouteDecision::MODE_INACTIVE);
-        global_plan_diagnostics_.detail =
-            "soft mode activated; initialized active region and retained "
-            "original EOHDT for this cycle";
-        return finish(GlobalPlanStatus::SUCCESS);
-    }
-    if(spectral_mode_state_.mode != SpectralMode::ACTIVE_SOFT ||
-       !partition_valid_){
-        decay_lock_debt();
-        global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-        global_plan_diagnostics_.used_fallback = true;
-        global_plan_diagnostics_.route_decision = static_cast<int>(
-            SpectralRouteDecision::MODE_INACTIVE);
-        global_plan_diagnostics_.detail =
-            "region route passed guards; waiting for activation persistence; "
-            "used original EOHDT";
-        return finish(GlobalPlanStatus::SUCCESS);
-    }
-
-    const LockDebtUpdate debt = UpdateLockDebt(lock_debt_,
-        candidate_metrics.path_cost, baseline_metrics.path_cost,
-        {spectral_exec_config_.lock_debt_decay,
-         spectral_exec_config_.lock_debt_max});
-    lock_debt_ = debt.debt;
-    if(debt.recovery_required){
-        EnterRecovery(RecoveryReason::LOCK_DEBT, now);
-        global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-        global_plan_diagnostics_.used_fallback = true;
-        global_plan_diagnostics_.route_decision = static_cast<int>(
-            SpectralRouteDecision::RECOVERY_BASELINE);
-        global_plan_diagnostics_.detail =
-            "accumulated detour debt entered recovery; used original EOHDT";
-        return finish(GlobalPlanStatus::SUCCESS);
-    }
-
-    route_h = std::move(candidate_route);
-    path2fh = std::move(candidate_path);
-    d1 = candidate_d1;
-    soft_route_selected_ = true;
-    if(candidate_targets_active_region) RecordActiveRegionPathResult(true);
-    DebugLineStrip(ps, route_h);
-    global_plan_diagnostics_.selected_path_cost = candidate_metrics.path_cost;
-    ++accepted_spectral_routes_;
-    global_plan_diagnostics_.method = GlobalPlanMethod::SPECTRAL_V2_SOFT;
-    global_plan_diagnostics_.route_decision = static_cast<int>(
-        SpectralRouteDecision::ACCEPTED);
-    global_plan_diagnostics_.detail =
-        "accepted Spectral-v2 soft regional route within regret bound";
-    return finish(GlobalPlanStatus::SUCCESS);
+    global_plan_diagnostics_.status = GlobalPlanStatus::INTERNAL_ERROR;
+    global_plan_diagnostics_.detail = "unknown planner mode";
+    return GlobalPlanStatus::INTERNAL_ERROR;
 }
 
 bool MultiDtgPlus::TspApproxiPlan(const Eigen::Vector3d &ps,

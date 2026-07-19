@@ -95,7 +95,6 @@ Exp/strong_check_interval: 3.0
 Exp/check_duration: 3.5
 Exp/exc_duration: 0.5
 Exp/replan_duration: 1.25
-Exp/traj_replan_duration: 0.4
 Exp/takeoff_x: 0.0
 Exp/takeoff_y: 0.0
 Exp/takeoff_z: 1.0
@@ -194,6 +193,3 @@ Computation/vdata_name3: target_plan
 Computation/vdata_name4: corridor_plan
 Computation/vdata_name5: traj_plan
 Computation/vdata_name6: mem
-
-# Explicit non-spectral baseline for V4.1 comparison.
-MR_DTG/SpectralV41/enabled: false

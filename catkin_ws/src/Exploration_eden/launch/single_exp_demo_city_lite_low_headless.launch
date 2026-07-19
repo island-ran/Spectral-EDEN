@@ -1,6 +1,9 @@
 <launch>
+    <arg name="planner_mode" default="spectral_v4"/>
 
     <node name="eden_demo" pkg="eden" type="eden_node" output="screen">
+        <rosparam command="load" file="$(find eden)/resource/spectral_eden_v4.yaml" />
+        <param name="MR_DTG/GlobalPlanner/mode" value="$(arg planner_mode)" />
         <rosparam command="load" file="$(find block_map_lite)/color/Paranoid.yaml" />
         <rosparam command="load" file="$(find eden)/resource/eden_sim_city_lite_low.yaml" />
         <rosparam command="load" file="$(find block_map_lite)/color/color_id.yaml" />

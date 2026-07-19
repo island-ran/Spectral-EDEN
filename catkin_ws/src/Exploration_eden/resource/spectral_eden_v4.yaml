@@ -1,0 +1,51 @@
+# Shared Spectral-EDEN V4 parameters. The startup mode is set by each launch
+# file's planner_mode argument so EDEN and V4 runs use clean, exclusive state.
+MR_DTG/SpectralV4/log_diagnostics: true
+
+# Persistent contracted skeleton
+MR_DTG/SpectralV4/skeleton_max_nodes: 512
+MR_DTG/SpectralV4/max_leaf_regions: 6
+MR_DTG/SpectralV4/max_recursive_depth: 3
+MR_DTG/SpectralV4/length_decay: 1.0
+MR_DTG/SpectralV4/clearance_reference: 1.0
+MR_DTG/SpectralV4/clearance_power: 1.0
+MR_DTG/SpectralV4/min_edge_weight: 1.0e-6
+MR_DTG/SpectralV4/clearance_binary_steps: 5
+MR_DTG/SpectralV4/clearance_max_samples: 64
+
+# Incremental Fiedler backend
+MR_DTG/SpectralV4/exact_max_nodes: 48
+MR_DTG/SpectralV4/exact_max_iterations: 12
+MR_DTG/SpectralV4/exact_residual_threshold: 1.0e-4
+
+# Landmark Nyström backend
+MR_DTG/SpectralV4/landmark_count: 32
+MR_DTG/SpectralV4/landmark_max_count: 48
+MR_DTG/SpectralV4/nearest_landmarks_per_node: 4
+MR_DTG/SpectralV4/nystrom_max_support: 512
+MR_DTG/SpectralV4/nystrom_residual_threshold: 5.0e-4
+
+# Local APPR backend
+MR_DTG/SpectralV4/ppr_alpha: 0.15
+MR_DTG/SpectralV4/ppr_epsilon: 1.0e-4
+MR_DTG/SpectralV4/ppr_max_pushes: 20000
+MR_DTG/SpectralV4/ppr_max_support_nodes: 512
+
+# Deterministic binary-cut acceptance
+MR_DTG/SpectralV4/max_ncut: 0.30
+MR_DTG/SpectralV4/min_balance: 0.20
+MR_DTG/SpectralV4/proposal_confirm_versions: 2
+MR_DTG/SpectralV4/proposal_jaccard_threshold: 0.80
+MR_DTG/SpectralV4/max_region_version_lag: 2
+MR_DTG/SpectralV4/region_invalidation_ratio: 0.30
+
+# Committed single-target planner
+MR_DTG/SpectralV4/local_frontier_top_k: 8
+MR_DTG/SpectralV4/max_adjacent_region_entries: 2
+MR_DTG/SpectralV4/min_target_commit_sec: 1.5
+MR_DTG/SpectralV4/target_switch_abs_margin_sec: 0.7
+MR_DTG/SpectralV4/target_switch_relative_margin: 0.10
+MR_DTG/SpectralV4/actual_gain_epsilon: 10.0
+
+# Main-thread budget (the worker has independent hard solver budgets above)
+MR_DTG/SpectralV4/main_thread_delta_budget_ms: 2.0

@@ -198,6 +198,10 @@ public:
     vector<Eigen::Vector3d> cur_pcl_;
     vector<Eigen::Vector3d> newly_register_idx_;
     double resolution_;
+    inline double ExploredVolume() const {
+        return static_cast<double>(stat_n_) *
+            std::pow(resolution_, 3);
+    }
     tr1::unordered_map<uint64_t, pair<uint8_t, uint16_t>> changed_pts_; // <pos id, <initial idx, changed times>>, initial idx: 0: unknown->free, 1: unknown->occ, 2: free, 3: occ
 
     Eigen::Vector3d local_origin_, local_upbd_, local_lowbd_, local_scale_;

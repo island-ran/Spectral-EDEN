@@ -6,22 +6,26 @@ public:
     SingleExpFSM(){};
     ~SingleExpFSM(){};
     void Init(ros::NodeHandle &nh, ros::NodeHandle &nh_private);
-    enum M_State{EXCUTE, SLEEP, RECOVER, FINISH, LOCALPLAN, TRAJREPLAN};
-    vector<string> state_names = {"EXCUTE", "SLEEP", "RECOVER", "FINISH", "LOCALPLAN", "TRAJREPLAN"};
+    enum M_State{EXCUTE, SLEEP, FINISH, LOCALPLAN};
+    vector<string> state_names = {"EXCUTE", "SLEEP", "FINISH", "LOCALPLAN"};
     void init(ros::NodeHandle &nh, ros::NodeHandle &nh_private);
 private:
     void FSMCallback(const ros::TimerEvent &e);
     void TriggerCallback(const std_msgs::EmptyConstPtr &msg);
     void ChangeState(const M_State &state);
-    void DebugSub(const std_msgs::Empty &msg);
 
     bool exploring_, start_trigger_;
     bool force_sample_;
-    ros::Subscriber trigger_sub_, debug_sub_;
+    ros::Subscriber trigger_sub_;
     SingleExp S_planner_;
     ros::Timer fsm_timer_;
     M_State state_;
     double t0_;
+    double retry_backoff_initial_;
+    double retry_backoff_max_;
+    double retry_backoff_current_;
+    double finish_hold_interval_;
+    int consecutive_planning_failures_;
 };
 inline void SingleExpFSM::ChangeState(const M_State &state){
     // ROS_WARN("FSM from %d to %d", state_, state);
@@ -57,4 +61,3 @@ inline void SingleExpFSM::ChangeState(const M_State &state){
 // #*++=+#                  #=+++#
 // #*+++#                   %*=++*#
 // #++=*%                   #%+=++#
-                            

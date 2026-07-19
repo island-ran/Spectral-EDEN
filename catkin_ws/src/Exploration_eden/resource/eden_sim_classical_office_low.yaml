@@ -101,7 +101,6 @@ Exp/strong_check_interval: 3.0
 Exp/check_duration: 3.5
 Exp/exc_duration: 0.5
 Exp/replan_duration: 1.25
-Exp/traj_replan_duration: 0.4
 Exp/takeoff_x: -6.0
 Exp/takeoff_y: 0.0
 Exp/takeoff_z: 1.0
@@ -201,59 +200,6 @@ Computation/vdata_name3: target_plan
 Computation/vdata_name4: corridor_plan
 Computation/vdata_name5: traj_plan
 Computation/vdata_name6: mem
-
-MR_DTG/Spectral/Enable: true
-MR_DTG/Spectral/FallbackToEOHDT: true
-MR_DTG/Spectral/LogDiagnostics: true
-
-# Spectral-EDEN v2: soft regional preference with an immutable EOHDT baseline.
-MR_DTG/SpectralV2/enabled: true
-MR_DTG/SpectralV2/async_solve: true
-MR_DTG/SpectralV2/corridor_compression: true
-MR_DTG/SpectralV2/min_spectral_nodes: 10
-MR_DTG/SpectralV2/max_spectral_nodes: 80
-MR_DTG/SpectralV2/dense_solver_max_nodes: 40
-MR_DTG/SpectralV2/iterative_max_iterations: 100
-MR_DTG/SpectralV2/iterative_tolerance: 1.0e-10
-MR_DTG/SpectralV2/iterative_shift: 1.0e-4
-MR_DTG/SpectralV2/spectral_knn: 5
-MR_DTG/SpectralV2/spectral_min_update_interval: 0.5
-MR_DTG/SpectralV2/spectral_max_update_interval: 3.0
-MR_DTG/SpectralV2/dirty_node_changes: 3
-MR_DTG/SpectralV2/dirty_edge_changes: 5
-MR_DTG/SpectralV2/spectral_time_budget_ms: 5.0
-MR_DTG/SpectralV2/max_spectral_epoch_age: 2
-MR_DTG/SpectralV2/spectral_timeout_limit: 3
-MR_DTG/SpectralV2/confidence_weight_ncut: 0.30
-MR_DTG/SpectralV2/confidence_weight_eigengap: 0.25
-MR_DTG/SpectralV2/confidence_weight_relative_lambda2: 0.15
-MR_DTG/SpectralV2/confidence_weight_bottleneck: 0.20
-MR_DTG/SpectralV2/confidence_weight_balance: 0.10
-MR_DTG/SpectralV2/partition_confidence_on: 0.70
-MR_DTG/SpectralV2/partition_confidence_off: 0.40
-MR_DTG/SpectralV2/partition_on_persistence: 3
-MR_DTG/SpectralV2/partition_off_persistence: 5
-MR_DTG/SpectralV2/partition_grace_epochs: 8
-MR_DTG/SpectralV2/label_hysteresis_ratio: 0.08
-MR_DTG/SpectralV2/region_match_threshold: 0.50
-MR_DTG/SpectralV2/max_route_regret: 0.05
-MR_DTG/SpectralV2/neighbor_override_distance: 2.0
-MR_DTG/SpectralV2/neighbor_override_margin: 0.5
-MR_DTG/SpectralV2/lock_debt_decay: 0.90
-MR_DTG/SpectralV2/lock_debt_max: 8.0
-MR_DTG/SpectralV2/recovery_duration: 5.0
-MR_DTG/SpectralV2/late_stage_frontier_count: 6
-MR_DTG/SpectralV2/late_stage_reactivate_frontier_count: 12
-MR_DTG/SpectralV2/late_stage_total_gain: 50
-MR_DTG/SpectralV2/late_stage_no_cut_epochs: 10
-MR_DTG/SpectralV2/frontier_low_gain_cycles: 2
-MR_DTG/SpectralV2/frontier_actual_gain_eps: 10
-MR_DTG/SpectralV2/frontier_expected_gain_eps: 1.0
-MR_DTG/SpectralV2/frontier_quarantine_time: 5.0
-MR_DTG/SpectralV2/region_done_confirm_cycles: 3
-MR_DTG/SpectralV2/region_stall_window: 8.0
-MR_DTG/SpectralV2/region_stall_timeout: 12.0
-MR_DTG/SpectralV2/repeat_target_limit: 3
 
 Exp/FinishStableDuration: 2.0
 Exp/FinishTotalGainThreshold: 10.0

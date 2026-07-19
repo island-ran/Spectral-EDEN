@@ -531,13 +531,18 @@ void MultiDtgPlus::BfUpdate(const Eigen::Vector3d &robot_pos){
     auto pni = paths_new.begin();
     auto ln = lenghts_new.begin();
     bool swarm_pub_hh;
-    for(;hhi != hh_idx_edges.end(); hhi++, pni++, ln++){
+    for(; hhi != hh_idx_edges.end() &&
+          pni != paths_new.end() &&
+          ln != lenghts_new.end();
+        hhi++, pni++, ln++){
         swarm_pub_hh = false;
-        if(pni->empty()){
-            for(auto &path : paths_new){
-                cout<<"path s:"<<path.size()<<endl;
-            }
-            StopageDebug("BfUpdate pni->empty()");
+        if(pni->empty() ||
+           hhi->first < 0 || hhi->second < 0 ||
+           static_cast<size_t>(hhi->first) >= H_vec.size() ||
+           static_cast<size_t>(hhi->second) >= H_vec.size() ||
+           !std::isfinite(*ln)){
+            ROS_ERROR("BfUpdate rejected an invalid retrieved HH path");
+            continue;
         }
         ConnectHH(H_vec[hhi->first], H_vec[hhi->second], *pni, path_old, *ln);
         if(path_old.empty()) swarm_pub_hh = true;
@@ -677,7 +682,6 @@ void MultiDtgPlus::BfUpdate(const Eigen::Vector3d &robot_pos){
     // cout<<"DTG update update paths between hnodes and fnodes:"<<(ros::WallTime::now() - t0).toSec()<<endl;
     // t0 = ros::WallTime::now();
     // NodesDebug();
-    ++frontier_epoch_;
 }
 
 void MultiDtgPlus::RemoveVp(uint32_t const &f_id, uint8_t const &v_id, bool broad_cast){

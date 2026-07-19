@@ -42,6 +42,7 @@ void LowResMap::UpdateLocalBBX( const pair<Eigen::Vector3d, Eigen::Vector3d> bbx
                             int gbid = LocalBid2GlobalBid(idx);
                             if(gbid == -1){
                                 StopageDebug("LoadShowList, error gbid");
+                                continue;
                             }
                             Showblocklist_.push_front(gbid);
                             LG_[idx]->show_flag_ = true;
@@ -51,6 +52,7 @@ void LowResMap::UpdateLocalBBX( const pair<Eigen::Vector3d, Eigen::Vector3d> bbx
                         int gbid = LocalBid2GlobalBid(idx);
                         if(gbid == -1){
                             StopageDebug("LoadShowList, error gbid");
+                            continue;
                         }
                         Showblocklist_.push_front(gbid);
                     }
@@ -213,6 +215,7 @@ void LowResMap::ReloadNodes(const Eigen::Vector3d &r_pos, vector<pair<int, int>>
     for(auto &p : edge_out){
         if(!GlobalPos2LocalBidNid(p, bid, nid)){ 
             StopageDebug("UpdateLocalTopo, impossible GlobalPos2LocalBidNid parent0");
+            continue;
         }
         pdir = LG_[bid]->local_grid_[nid]->parent_dir_;
         if(pdir == 0) continue;
@@ -274,6 +277,7 @@ void LowResMap::ReloadNodes(const Eigen::Vector3d &r_pos, vector<pair<int, int>>
     for(auto &p : edge_in){
         if(!GlobalPos2LocalBidNid(p, bid, nid)){ 
             StopageDebug("UpdateLocalTopo, impossible GlobalPos2LocalBidNid parent0");
+            continue;
         }
         if(LG_[bid]->local_grid_[nid]->root_id_ != 0){
             // LG_[bid]->local_grid_[nid]->root_id_ = 0;
@@ -666,6 +670,7 @@ void LowResMap::ReloadNodesBf(const Eigen::Vector3d &r_pos){
             cout<<"bid.first:"<<bid.first<<endl;
             cout<<"lid:"<<lid<<endl;
             StopageDebug("ReloadNodesBf GlobalPos2LocalBid lid == -1");
+            continue;
         }
         change_list.push_back({lid, LG_[bid.first]});
         for(auto &n : LG_[bid.first]->local_grid_){
@@ -697,11 +702,12 @@ void LowResMap::ReloadNodesBf(const Eigen::Vector3d &r_pos){
     /* initialize new blocks */
     for(auto &bid: new_idxs){
         int lid = GlobalPos2LocalBid(bid.second);
-        if(lid < 0 || lid > LG_.size()){
+        if(lid < 0 || static_cast<size_t>(lid) >= LG_.size()){
             cout<<"lid:"<<lid<<endl;
             cout<<"LG_.size():"<<LG_.size()<<endl;
             cout<<"bid.second:"<<bid.second.transpose()<<endl;
             StopageDebug("lid out!");
+            continue;
         }
         InitializeBlock(lid, bid.first);
 
@@ -741,9 +747,11 @@ void LowResMap::SetNodeStatesBf(vector<Eigen::Vector3d> &new_free_nodes){
         if(!map_->InsideExpMap(p)) continue;
         if(!GlobalPos2LocalBidNid(p, bid, nid)){
             StopageDebug("SetNodeStates, impossible GlobalPos2LocalBidNid1");
+            continue;
         }
         if(bid < 0 || bid >= LG_.size()){
             StopageDebug("SetNodeStatesBf bid error");
+            continue;
         }
         if(nid < 0 || nid >= block_size_(0) * block_size_(1) * block_size_(2)){
             int x = (p(0) - local_origin_(0)) /  blockscale_(0);
@@ -760,6 +768,7 @@ void LowResMap::SetNodeStatesBf(vector<Eigen::Vector3d> &new_free_nodes){
             y = y - LG_[bid]->origin_(1);
             z = z - LG_[bid]->origin_(2);
             StopageDebug("SetNodeStatesBf nid error");
+            continue;
         }
         if(LG_[bid]->local_grid_[nid] == Outnode_) continue;
 
@@ -1047,7 +1056,6 @@ int LowResMap::PathCheck(list<Eigen::Vector3d> &path, bool allow_uknown){
 
     if(path.size() == 0) {
         ROS_ERROR("strange path! %ld", path.size());
-        StopageDebug("strange path!");
         return 0;
     // ROS_WARN("PathCheck2");
     }
@@ -1096,20 +1104,6 @@ int LowResMap::PathCheck(list<Eigen::Vector3d> &path, bool allow_uknown){
         }
         // ROS_WARN("PathCheck5");
 
-        ray_iter = ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
-        if(!InsideLocalMap(ray_iter)){
-            if(allow_uknown){
-                ps_it++;
-                pe_it++;
-                continue;
-            }              
-            else return 1;
-        }
-        // ROS_WARN("PathCheck6");
-
-        if(!IsFeasible(ray_iter, allow_uknown)) {
-            return 2;
-        }
         ps_it++;
         pe_it++;
         // ROS_WARN("PathCheck7");
@@ -1123,9 +1117,9 @@ int LowResMap::PathCheck(list<Eigen::Vector3d> &path, bool allow_uknown){
 int LowResMap::PathCheck(vector<Eigen::Vector3d> &path, bool allow_uknown){
     for(auto &p : path){
         if(!InsideLocalMap(p)) return 1;
+        if(!IsFeasible(p, allow_uknown)) return 2;
     }
     if(path.size() <= 1) {
-        ROS_ERROR("strange path! %ld", path.size());
         return 0;
     }
     RayCaster rc;
@@ -1148,25 +1142,13 @@ int LowResMap::PathCheck(vector<Eigen::Vector3d> &path, bool allow_uknown){
                 else return 1;
             }
             if(!IsFeasible(ray_iter, allow_uknown)) {
-                return false;
+                return 2;
             }
-        }
-        ray_iter = ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
-        if(!InsideLocalMap(ray_iter)){
-            if(allow_uknown){
-                ps_it++;
-                pe_it++;
-                continue;
-            }              
-            else return 1;
-        }
-        if(!IsFeasible(ray_iter, allow_uknown)) {
-            return false;
         }
         ps_it++;
         pe_it++;
     }
-    return true;
+    return 0;
 }
 
 bool LowResMap::CheckPathHomo(list<Eigen::Vector3d> &path1, list<Eigen::Vector3d> &path2){
@@ -1192,15 +1174,15 @@ int LowResMap::FindCorridors(const vector<Eigen::Vector3d> path,
     corridors.clear();
     corridorVs.clear(); 
     int s = 1;
+    if(path.empty()){
+        ROS_WARN("FindCorridors rejected an empty path");
+        return 0;
+    }
     for(auto pt : path){
         // if(allow_unknown) cout<<"pt:"<<pt.transpose()<<endl;
         if(!IsFeasible(pt, allow_unknown)){
-            // cout<<"allow_unknown:"<<allow_unknown<<endl;
-            cout<<"!!!!"<<endl;
-            for(auto &p : path){
-                cout<<"p:"<<p.transpose()<<"  "<<IsFeasible(p, true)<<"  "<<IsFeasible(p, false)<<"  "<< InsideLocalMap(p)<<endl;
-            }
-            StopageDebug("FindCorridors infeasible");
+            ROS_WARN("FindCorridors rejected an infeasible path point");
+            return 0;
         }
         if(InsideLocalMap(pt)) path_local.emplace_back(pt);
         else {
@@ -1214,11 +1196,11 @@ int LowResMap::FindCorridors(const vector<Eigen::Vector3d> path,
         }
     }
 
-    if(!path_local.empty()){
-        path_cast.emplace_back(path_local.front());
-        // cout<<"pca:"<<path_local.front().transpose()<<endl;
-        // path_cast.emplace_back(GetStdPos(path.front()));
+    if(path_local.empty()){
+        ROS_WARN("FindCorridors has no path point inside the local map");
+        return 0;
     }
+    path_cast.emplace_back(path_local.front());
 
     RayCaster rc;
 
@@ -1262,6 +1244,10 @@ int LowResMap::FindCorridors(const vector<Eigen::Vector3d> path,
         // cout<<"pca0:"<<path_cast[0].transpose()<<endl;
         // if(allow_unknown) cout<<"pca:"<<path_cast[0].transpose()<<endl;
     }
+    if(path_cast.size() < 2){
+        ROS_WARN("FindCorridors cannot form a local path segment");
+        return 0;
+    }
 
     pruned_path.emplace_back(path_local[0]);
     // cout<<"pruned_path"<<pruned_path.size()<<"  :"<<pruned_path.back().transpose()<<endl;
@@ -1282,6 +1268,10 @@ int LowResMap::FindCorridors(const vector<Eigen::Vector3d> path,
             newseg_flag = false;
         }
 
+        if(end_idx + 1 >= static_cast<int>(path_cast.size())){
+            ROS_ERROR("FindCorridors exhausted path without a corridor");
+            return 0;
+        }
         end_idx++;
         cur_length += (path_cast[end_idx] - path_cast[end_idx - 1]).norm();
         cur_total_length += (path_cast[end_idx] - path_cast[end_idx - 1]).norm();
@@ -1346,7 +1336,8 @@ int LowResMap::FindCorridors(const vector<Eigen::Vector3d> path,
                         }
                     }
 
-                    StopageDebug("start_idx == end_idx");
+                    ROS_ERROR("FindCorridors cannot expand the next segment");
+                    return 0;
                 }
             }
             corridors.emplace_back(h);
@@ -1546,10 +1537,7 @@ bool LowResMap::PrunePath(const list<Eigen::Vector3d> &path, list<Eigen::Vector3
     pruned_path.clear();
     Eigen::Vector3d inv_res, ray_iter;
     Eigen::Vector3d half_res = 0.5 * node_scale_;
-    Eigen::Vector3i p_i;
-    list<Eigen::Vector3d> std_off_path;
-    list<Eigen::Vector3d>::iterator ps_it, pe_it;
-    bool free_ray;
+    vector<Eigen::Vector3d> std_off_path;
     RayCaster rc;
 
     for(auto &p : path){
@@ -1557,48 +1545,47 @@ bool LowResMap::PrunePath(const list<Eigen::Vector3d> &path, list<Eigen::Vector3
         std_off_path.push_back(GetStdPos(p));
     }
 
-    pruned_path.push_back(std_off_path.front());
     for(int dim = 0; dim < 3; dim++) inv_res(dim) = 1.0 / node_scale_(dim);
-    for(list<Eigen::Vector3d>::iterator ps_it = std_off_path.begin(); pe_it != std_off_path.end(); pe_it++){
-        pe_it = ps_it;
-        double seg_length = 0;
-        for(list<Eigen::Vector3d>::iterator pf_it = pe_it; pe_it != std_off_path.end() && seg_length < prune_seg_length_; pe_it++) {
-            seg_length += ((*pf_it) - (*pe_it)).norm();
-            pf_it = pe_it;
+    auto line_free = [&](size_t from, size_t to){
+        if(!IsFeasible(std_off_path[from]) ||
+           !IsFeasible(std_off_path[to])) return false;
+        rc.setInput((std_off_path[from] - origin_).cwiseProduct(inv_res),
+                    (std_off_path[to] - origin_).cwiseProduct(inv_res));
+        while(rc.step(ray_iter)){
+            const Eigen::Vector3d point =
+                ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
+            if(!IsFeasible(point)) return false;
         }
-        if(pe_it != std_off_path.end()) pe_it--;
-        pe_it--;
-
-        while (1)
-        {
-            if(ps_it == pe_it) return false;
-            free_ray = true;
-            rc.setInput((*ps_it - origin_).cwiseProduct(inv_res), (*pe_it - origin_).cwiseProduct(inv_res));
-            while(rc.step(ray_iter)){
-                ray_iter = ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
-                if(!IsFeasible(ray_iter)) {
-                    free_ray = false;
-                    break;
-                }
-            }
-            ray_iter = ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
-            if(!IsFeasible(ray_iter)) {
-                free_ray = false;
-            }
-
-            if(free_ray) {
-                length += (pruned_path.back() - (*pe_it)).norm();
-                pruned_path.push_back(*pe_it);
-                break;
-            }
-            pe_it--;
+        return true;
+    };
+    vector<size_t> selected(1, 0U);
+    size_t start = 0U;
+    while(start + 1U < std_off_path.size()){
+        size_t limit = start + 1U;
+        double accumulated =
+            (std_off_path[limit] - std_off_path[start]).norm();
+        while(limit + 1U < std_off_path.size()){
+            const double next = accumulated +
+                (std_off_path[limit + 1U] -
+                 std_off_path[limit]).norm();
+            if(next > prune_seg_length_) break;
+            accumulated = next;
+            ++limit;
         }
-        ps_it = pe_it;
+        size_t chosen = limit;
+        while(chosen > start && !line_free(start, chosen)) --chosen;
+        if(chosen == start) return false;
+        selected.push_back(chosen);
+        start = chosen;
     }
-    length += (pruned_path.back() - path.back()).norm();
-    length += (pruned_path.front() - path.front ()).norm();
+    pruned_path.push_back(path.front());
+    for(size_t index = 1U; index + 1U < selected.size(); ++index)
+        pruned_path.push_back(std_off_path[selected[index]]);
     pruned_path.push_back(path.back());
-    pruned_path.push_front(path.front());
+    auto previous = pruned_path.begin();
+    for(auto current = std::next(previous);
+        current != pruned_path.end(); ++current, ++previous)
+        length += (*current - *previous).norm();
     return true;
 }
 
@@ -1612,58 +1599,52 @@ bool LowResMap::PrunePath(const vector<Eigen::Vector3d> &path, vector<Eigen::Vec
     pruned_path.clear();
     Eigen::Vector3d inv_res, ray_iter;
     Eigen::Vector3d half_res = 0.5 * node_scale_;
-    Eigen::Vector3i p_i;
-    list<Eigen::Vector3d> std_off_path;
-    list<Eigen::Vector3d>::iterator ps_it, pe_it;
-    bool free_ray;
+    vector<Eigen::Vector3d> std_off_path;
     RayCaster rc;
 
     for(auto &p : path){
         if(!InsideLocalMap(p)) return false;
         std_off_path.push_back(GetStdPos(p));
     }
-    pruned_path.push_back(path.front());
-    pruned_path.push_back(std_off_path.front());
     for(int dim = 0; dim < 3; dim++) inv_res(dim) = 1.0 / node_scale_(dim);
-    for(list<Eigen::Vector3d>::iterator ps_it = std_off_path.begin(); pe_it != std_off_path.end(); pe_it++){
-        pe_it = ps_it;
-        double seg_length = 0;
-        for(list<Eigen::Vector3d>::iterator pf_it = pe_it; pe_it != std_off_path.end() && seg_length < prune_seg_length_; pe_it++) {
-            seg_length += ((*pf_it) - (*pe_it)).norm();
-            pf_it = pe_it;
+    auto line_free = [&](size_t from, size_t to){
+        if(!IsFeasible(std_off_path[from]) ||
+           !IsFeasible(std_off_path[to])) return false;
+        rc.setInput((std_off_path[from] - origin_).cwiseProduct(inv_res),
+                    (std_off_path[to] - origin_).cwiseProduct(inv_res));
+        while(rc.step(ray_iter)){
+            const Eigen::Vector3d point =
+                ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
+            if(!IsFeasible(point)) return false;
         }
-        if(pe_it != std_off_path.end()) pe_it--;
-        pe_it--;
-
-        while (1)
-        {
-            if(ps_it == pe_it) return false;
-            free_ray = true;
-            rc.setInput((*ps_it - origin_).cwiseProduct(inv_res), (*pe_it - origin_).cwiseProduct(inv_res));
-            while(rc.step(ray_iter)){
-                ray_iter = ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
-                if(!IsFeasible(ray_iter)) {
-                    free_ray = false;
-                    break;
-                }
-            }
-            ray_iter = ray_iter.cwiseProduct(node_scale_) + origin_ + half_res;
-            if(!IsFeasible(ray_iter)) {
-                free_ray = false;
-            }
-
-            if(free_ray) {
-                length += (pruned_path.back() - (*pe_it)).norm();
-                pruned_path.push_back(*pe_it);
-                break;
-            }
-            pe_it--;
+        return true;
+    };
+    vector<size_t> selected(1, 0U);
+    size_t start = 0U;
+    while(start + 1U < std_off_path.size()){
+        size_t limit = start + 1U;
+        double accumulated =
+            (std_off_path[limit] - std_off_path[start]).norm();
+        while(limit + 1U < std_off_path.size()){
+            const double next = accumulated +
+                (std_off_path[limit + 1U] -
+                 std_off_path[limit]).norm();
+            if(next > prune_seg_length_) break;
+            accumulated = next;
+            ++limit;
         }
-        ps_it = pe_it;
+        size_t chosen = limit;
+        while(chosen > start && !line_free(start, chosen)) --chosen;
+        if(chosen == start) return false;
+        selected.push_back(chosen);
+        start = chosen;
     }
-    length += (pruned_path.back() - path.back()).norm();
-    length += (pruned_path.front() - path.front ()).norm();
+    pruned_path.push_back(path.front());
+    for(size_t index = 1U; index + 1U < selected.size(); ++index)
+        pruned_path.push_back(std_off_path[selected[index]]);
     pruned_path.push_back(path.back());
+    for(size_t index = 1U; index < pruned_path.size(); ++index)
+        length += (pruned_path[index] - pruned_path[index - 1U]).norm();
     return true;
 }
 

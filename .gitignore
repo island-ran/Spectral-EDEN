@@ -29,3 +29,7 @@ images/
 /eden_src/autonomous_exploration_environments/campus/meshes/campus.dae
 /eden_src/autonomous_exploration_environments/garage/preview/pointcloud.ply
 **/pointcloud.ply
+
+# ROS运行日志
+.ros_logs/
+*.pcd

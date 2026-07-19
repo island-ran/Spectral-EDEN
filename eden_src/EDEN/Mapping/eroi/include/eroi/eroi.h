@@ -302,6 +302,9 @@ public:
     SensorType sensor_type_;
     vector<list<pair<Eigen::Vector3i, uint8_t>>> vp_dict_; // <list<eroi diff, vp_id>>
     vector<EroiNode> EROI_;
+    // Frontier IDs whose cached unknown count or lifecycle state changed in
+    // the most recent UpdateFrontier call.
+    vector<uint32_t> updated_frontier_ids_;
     // vector<uint32_t> dead_erois_;    
     vector<pair<uint32_t, uint8_t>> dead_fnodes_;    
     vector<Eigen::Vector4d> vps_;
@@ -739,10 +742,14 @@ inline void EroiGrid::GetMotionInfo(const int &i1, const int &i2, double &vm, do
 
 inline void EroiGrid::GetMotionPath(const Eigen::Vector3d &center, const int &i1, const int &i2, vector<Eigen::Vector3d> &path){
     if(i1 < 0 || i1 >= motion_trajs_.size()){
-        StopageDebug("GetMotionPath1");
+        ROS_ERROR("GetMotionPath: source viewpoint index is invalid");
+        path.clear();
+        return;
     }
     if(i2 < 0 || i2 >= motion_trajs_[i1].size()){
-        StopageDebug("GetMotionPath2");
+        ROS_ERROR("GetMotionPath: motion index is invalid");
+        path.clear();
+        return;
     }
     // cout<<"i1:"<<i1<<" i2:"<<i2<<endl;
     path = motion_trajs_[i1][i2];
@@ -754,9 +761,7 @@ inline void EroiGrid::GetMotionPath(const Eigen::Vector3d &center, const int &i1
 }
 
 inline void EroiGrid::StopageDebug(string c){
-    std::cout << "\033[0;31m "<<c<<" \033[0m" << std::endl;    
-    // ros::shutdown();
-    getchar();
+    ROS_ERROR_STREAM("[EROI invariant] " << c);
 }
 
 inline bool EroiGrid::InsideFov(const Eigen::MatrixX3d &R, const Eigen::Vector3d &dir){
