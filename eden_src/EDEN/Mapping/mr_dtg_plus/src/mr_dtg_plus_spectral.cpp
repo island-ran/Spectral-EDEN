@@ -15,12 +15,6 @@ using namespace DTGPlus;
 namespace {
 constexpr double kUnreachableDistance = 999998.0;
 constexpr double kBlockedEdgeDistance = 200000.0;
-using SteadyClock = std::chrono::steady_clock;
-
-double ElapsedMilliseconds(const SteadyClock::time_point &start){
-    return std::chrono::duration<double, std::milli>(
-        SteadyClock::now() - start).count();
-}
 
 double Jaccard(const std::unordered_set<uint32_t> &lhs,
                const std::unordered_set<uint32_t> &rhs){
@@ -34,52 +28,56 @@ double Jaccard(const std::unordered_set<uint32_t> &lhs,
                             : static_cast<double>(intersection) / static_cast<double>(union_size);
 }
 
-PartitionEvidence BuildPartitionEvidenceValue(
-    const SpectralResult &result, const SpectralGraphSnapshot &snapshot,
-    double lambda2_ema, bool lambda2_ema_initialized,
-    double numeric_epsilon){
-    PartitionEvidence evidence;
-    if(!result.has_valid_cut()) return evidence;
-    evidence.ncut = result.diagnostics.ncut;
-    evidence.relative_eigengap = RelativeEigengap(
-        result.diagnostics.lambda2, result.diagnostics.lambda3,
-        numeric_epsilon);
-    evidence.relative_lambda2 = lambda2_ema_initialized
-        ? RelativeLambda2(result.diagnostics.lambda2, lambda2_ema,
-                          numeric_epsilon)
-        : 1.0;
-    evidence.cluster0_size = result.diagnostics.cut_left_size;
-    evidence.cluster1_size = result.diagnostics.cut_right_size;
+// Farthest-point sampling: select k landmarks from a set of points with
+// supplied positions.  Returns indices into the positions vector.
+std::vector<size_t> FarthestPointSampling(
+    const std::vector<Eigen::Vector3d> &positions, size_t k){
+    const size_t n = positions.size();
+    if(n == 0 || k == 0) return {};
+    if(k >= n){
+        std::vector<size_t> all(n);
+        for(size_t i = 0; i < n; ++i) all[i] = i;
+        return all;
+    }
+    std::vector<size_t> landmarks;
+    landmarks.reserve(k);
+    std::vector<double> min_dist(n, std::numeric_limits<double>::infinity());
 
-    vector<double> cut_clearance;
-    vector<double> inside_clearance;
-    for(const SpectralEdgeInput &edge : snapshot.edges){
-        if(!std::isfinite(edge.clearance) || edge.clearance < 0.0) continue;
-        const auto from = result.id_to_index.find(edge.from_h_id);
-        const auto to = result.id_to_index.find(edge.to_h_id);
-        if(from == result.id_to_index.end() || to == result.id_to_index.end() ||
-           from->second >= result.labels.size() ||
-           to->second >= result.labels.size()) continue;
-        if(result.labels[from->second] != result.labels[to->second]){
-            cut_clearance.emplace_back(edge.clearance);
+    // First landmark: centroid-closest point
+    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+    for(const auto &p : positions) centroid += p;
+    centroid /= static_cast<double>(n);
+    size_t first = 0;
+    double first_dist = (positions[0] - centroid).squaredNorm();
+    for(size_t i = 1; i < n; ++i){
+        const double d = (positions[i] - centroid).squaredNorm();
+        if(d < first_dist){ first_dist = d; first = i; }
+    }
+    landmarks.push_back(first);
+    for(size_t i = 0; i < n; ++i){
+        min_dist[i] = (positions[i] - positions[first]).squaredNorm();
+    }
+
+    while(landmarks.size() < k){
+        size_t farthest = 0;
+        double farthest_dist = min_dist[0];
+        for(size_t i = 1; i < n; ++i){
+            if(min_dist[i] > farthest_dist){
+                farthest_dist = min_dist[i];
+                farthest = i;
+            }
         }
-        else{
-            inside_clearance.emplace_back(edge.clearance);
+        landmarks.push_back(farthest);
+        for(size_t i = 0; i < n; ++i){
+            const double d = (positions[i] - positions[farthest]).squaredNorm();
+            if(d < min_dist[i]) min_dist[i] = d;
         }
     }
-    const auto median = [](vector<double> values){
-        if(values.empty()) return std::numeric_limits<double>::quiet_NaN();
-        std::sort(values.begin(), values.end());
-        const size_t middle = values.size() / 2U;
-        return (values.size() & 1U) != 0U ? values[middle]
-            : values[middle - 1U] +
-              0.5 * (values[middle] - values[middle - 1U]);
-    };
-    evidence.median_cut_clearance = median(cut_clearance);
-    evidence.median_inside_clearance = median(inside_clearance);
-    return evidence;
+    return landmarks;
 }
 }
+
+// ── Path clearance estimation (unchanged) ──
 
 double MultiDtgPlus::EstimatePathClearance(
     const list<Eigen::Vector3d> &path) const{
@@ -88,7 +86,7 @@ double MultiDtgPlus::EstimatePathClearance(
     const double maximum = spectral_config_.clearance_reference;
     const Eigen::Vector3d robot_size = LRM_->GetRobotSize();
     const size_t max_samples = static_cast<size_t>(
-        std::max(2, spectral_exec_config_.clearance_max_samples));
+        std::max(2, spectral_v4_config_.clearance_max_samples));
     const size_t stride = std::max<size_t>(1,
         (path.size() + max_samples - 1) / max_samples);
     double path_clearance = maximum;
@@ -100,7 +98,7 @@ double MultiDtgPlus::EstimatePathClearance(
 
         double low = 0.0;
         double high = maximum;
-        for(int step = 0; step < spectral_exec_config_.clearance_binary_steps; ++step){
+        for(int step = 0; step < spectral_v4_config_.clearance_binary_steps; ++step){
             const double radius = 0.5 * (low + high);
             const Eigen::Vector3d expanded = robot_size +
                 Eigen::Vector3d::Ones() * (2.0 * radius);
@@ -140,6 +138,8 @@ double MultiDtgPlus::CachedPathClearance(const h_ptr &start,
     }
     return std::max(0.0, clearance);
 }
+
+// ── Edge betweenness (unchanged) ──
 
 bool MultiDtgPlus::ComputeEdgeBetweenness(
     SpectralGraphSnapshot &snapshot, std::string &reason) const{
@@ -215,44 +215,7 @@ bool MultiDtgPlus::ComputeEdgeBetweenness(
     return true;
 }
 
-bool MultiDtgPlus::BuildActiveCompleteSpectralGraph(
-    const GlobalRouteContext &context, SpectralGraphSnapshot &snapshot,
-    std::string &reason){
-    snapshot = SpectralGraphSnapshot();
-    snapshot.graph_version = dtg_version_;
-    for(const auto &h : context.active_hnodes){
-        if(h == nullptr) continue;
-        snapshot.nodes.emplace_back(h->id_, true);
-    }
-    for(size_t i = 0; i < context.active_hnodes.size(); ++i){
-        for(size_t j = i + 1; j < context.active_hnodes.size(); ++j){
-            const double length = context.distance_matrix(
-                static_cast<Eigen::Index>(i + 1), static_cast<Eigen::Index>(j + 1));
-            if(!std::isfinite(length) || length <= 0.0 || length >= kUnreachableDistance){
-                reason = "active-region distance matrix contains an invalid entry";
-                return false;
-            }
-            SpectralEdgeInput spectral_edge(context.active_hnodes[i]->id_,
-                context.active_hnodes[j]->id_, length);
-            if(spectral_config_.weight_mode != SpectralWeightMode::DISTANCE){
-                const auto cached = h_dist_map_.find(HPairKey(
-                    context.active_hnodes[i]->id_, context.active_hnodes[j]->id_));
-                if(cached == h_dist_map_.end() || cached->second.dtg_version != dtg_version_){
-                    reason = "complete-graph path clearance is absent from the live cache";
-                    return false;
-                }
-                spectral_edge.clearance = CachedPathClearance(
-                    context.active_hnodes[i], cached->second);
-            }
-            snapshot.edges.emplace_back(spectral_edge);
-        }
-    }
-    if(spectral_config_.weight_mode ==
-       SpectralWeightMode::DISTANCE_CLEARANCE_BETWEENNESS){
-        return ComputeEdgeBetweenness(snapshot, reason);
-    }
-    return true;
-}
+// ── Sparse support spectral graph (kNN + MST backbone + corridor compression) ──
 
 bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
     const GlobalRouteContext &context, SpectralGraphSnapshot &snapshot,
@@ -269,22 +232,12 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
         preserved_ids.insert(h->id_);
     }
 
-    // Select only k relevant neighbours per active anchor.  Add an active-node
-    // MST as a connectivity backbone: a symmetric kNN union alone can split
-    // precisely at the long bottleneck that the spectral layer must inspect.
     std::unordered_set<uint64_t> support_pairs;
     auto pair_distance = [&](size_t i, size_t j){
-        double distance = context.distance_matrix.rows() >
-                static_cast<Eigen::Index>(i + 1) &&
-            context.distance_matrix.cols() > static_cast<Eigen::Index>(j + 1)
-            ? context.distance_matrix(static_cast<Eigen::Index>(i + 1),
-                                      static_cast<Eigen::Index>(j + 1))
-            : kUnreachableDistance;
-        if(!std::isfinite(distance) || distance >= kUnreachableDistance){
-            distance = (context.active_hnodes[i]->pos_ -
-                        context.active_hnodes[j]->pos_).norm();
-        }
-        return distance;
+        // Use Euclidean distance between active H-node positions as a fast proxy
+        // when no precomputed distance matrix entry is available.
+        return (context.active_hnodes[i]->pos_ -
+                context.active_hnodes[j]->pos_).norm();
     };
     for(size_t i = 0; i < context.active_hnodes.size(); ++i){
         vector<pair<double, size_t>> neighbours;
@@ -300,7 +253,7 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
                        context.active_hnodes[rhs.second]->id_;
             });
         const size_t keep = std::min(neighbours.size(), static_cast<size_t>(
-            std::max(1, spectral_exec_config_.spectral_knn)));
+            std::max(1, spectral_v4_config_.spectral_knn)));
         for(size_t k = 0; k < keep; ++k){
             const size_t j = neighbours[k].second;
             support_pairs.insert(HPairKey(context.active_hnodes[i]->id_,
@@ -308,6 +261,7 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
         }
     }
 
+    // MST backbone ensures connectivity
     const size_t active_count = context.active_hnodes.size();
     if(active_count > 1U){
         vector<double> key(active_count, std::numeric_limits<double>::infinity());
@@ -338,8 +292,7 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
         }
     }
 
-    // Materialize only selected kNN/backbone paths.  Grouping targets by start
-    // preserves the existing batched Dijkstra implementation.
+    // Materialize paths for selected pairs
     std::unordered_map<uint32_t, vector<h_ptr>> missing_by_start;
     for(const uint64_t pair_key : support_pairs){
         const uint32_t from_id = static_cast<uint32_t>(pair_key >> 32U);
@@ -357,8 +310,7 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
         MainTainDistMap(start, missing.second);
     }
 
-    // Retain the union of selected shortest paths, represented by real H-H
-    // edges rather than all-pairs shortcut edges.
+    // Union of selected shortest paths
     for(const uint64_t key : support_pairs){
         const auto cached = h_dist_map_.find(key);
         if(cached == h_dist_map_.end() || cached->second.dtg_version != dtg_version_ ||
@@ -370,8 +322,7 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
         }
     }
 
-    // Root paths retain the live robot approach branches and their seed
-    // endpoints.  Seeds are protected from corridor-chain compression.
+    // Preserve seeds and root-path nodes
     for(const auto &seed : context.seed_hnodes){
         if(seed != nullptr) preserved_ids.insert(seed->id_);
     }
@@ -385,8 +336,6 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
     ordered_ids.reserve(support_nodes.size());
     for(const auto &entry : support_nodes){
         ordered_ids.emplace_back(entry.first);
-        // A degree-two H-node with any frontier attachment is semantically an
-        // anchor even if that frontier is currently deferred/quarantined.
         if(!entry.second->hf_edges_.empty()) preserved_ids.insert(entry.first);
     }
     std::sort(ordered_ids.begin(), ordered_ids.end());
@@ -407,8 +356,6 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
             const uint64_t key = HPairKey(head_id, tail_id);
             if(inserted_edges.insert(key).second){
                 SpectralEdgeInput spectral_edge(head_id, tail_id, edge->length_);
-                // Clearance also supplies the v2 bottleneck-confidence term,
-                // even when the eigensolver itself uses distance-only weights.
                 spectral_edge.clearance = EdgeClearance(edge);
                 raw_snapshot.edges.emplace_back(spectral_edge);
             }
@@ -421,7 +368,7 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
     }
 
     last_raw_spectral_node_count_ = raw_snapshot.nodes.size();
-    if(spectral_exec_config_.corridor_compression){
+    if(spectral_v4_config_.corridor_compression){
         if(!CompressDegreeTwoChains(raw_snapshot, preserved_ids, snapshot, reason)){
             return false;
         }
@@ -446,6 +393,93 @@ bool MultiDtgPlus::BuildSparseSupportSpectralGraph(
     }
     return true;
 }
+
+// ── V4.3: Landmark-based skeleton downsampling ──
+
+bool MultiDtgPlus::SelectSkeletonLandmarks(
+    const GlobalRouteContext &context,
+    SpectralGraphSnapshot &snapshot, std::string &reason){
+    const size_t n = context.active_hnodes.size();
+    const int max_nodes = spectral_v4_config_.skeleton_max_nodes;
+    const int landmark_count = spectral_v4_config_.skeleton_landmark_count;
+
+    if(static_cast<int>(n) <= max_nodes){
+        // No downsampling needed — build full support graph.
+        return BuildSparseSupportSpectralGraph(context, snapshot, reason);
+    }
+
+    // Extract positions and select landmarks via farthest-point sampling.
+    std::vector<Eigen::Vector3d> positions;
+    positions.reserve(n);
+    for(const auto &h : context.active_hnodes){
+        positions.push_back(h->pos_);
+    }
+
+    const size_t k = std::min(static_cast<size_t>(landmark_count), n);
+    const std::vector<size_t> landmark_indices = FarthestPointSampling(positions, k);
+
+    // Build a reduced context with only landmark nodes as "active".
+    GlobalRouteContext landmark_context;
+    landmark_context.seed_hnodes = context.seed_hnodes;
+    landmark_context.seed_distances = context.seed_distances;
+    landmark_context.seed_paths = context.seed_paths;
+
+    // Landmarks plus any seed nodes that are active boundaries
+    std::unordered_set<uint32_t> landmark_ids;
+    for(const size_t idx : landmark_indices){
+        if(idx < context.active_hnodes.size()){
+            const auto &h = context.active_hnodes[idx];
+            if(h != nullptr) landmark_ids.insert(h->id_);
+        }
+    }
+    // Always include seeds that are active boundaries
+    for(const auto &h : context.seed_hnodes){
+        if(h != nullptr && IsActiveBoundary(h)){
+            landmark_ids.insert(h->id_);
+        }
+    }
+
+    for(const auto &h : context.active_hnodes){
+        if(h != nullptr && landmark_ids.count(h->id_)){
+            landmark_context.active_hnodes.push_back(h);
+        }
+    }
+
+    // Build root path entries for landmark nodes only
+    for(const auto &h : landmark_context.active_hnodes){
+        const auto it = context.active_index.find(h->id_);
+        if(it != context.active_index.end() && it->second < context.root_paths.size()){
+            landmark_context.root_paths.push_back(context.root_paths[it->second]);
+        }
+        else{
+            landmark_context.root_paths.push_back({1e8, {}});
+        }
+        landmark_context.active_index[h->id_] = landmark_context.active_hnodes.size() - 1;
+    }
+
+    if(landmark_context.active_hnodes.empty()){
+        reason = "landmark downsampling produced an empty active set";
+        return false;
+    }
+
+    ROS_WARN("[Spectral-EDEN V4.3] Landmark downsampling: %zu → %zu nodes",
+             n, landmark_context.active_hnodes.size());
+
+    return BuildSparseSupportSpectralGraph(landmark_context, snapshot, reason);
+}
+
+bool MultiDtgPlus::BuildSpectralGraphSnapshot(
+    const GlobalRouteContext &context, SpectralGraphSnapshot &snapshot,
+    std::string &reason){
+    // Check if landmark downsampling is needed
+    if(static_cast<int>(context.active_hnodes.size()) >
+       spectral_v4_config_.skeleton_max_nodes){
+        return SelectSkeletonLandmarks(context, snapshot, reason);
+    }
+    return BuildSparseSupportSpectralGraph(context, snapshot, reason);
+}
+
+// ── Corridor compression (unchanged) ──
 
 bool MultiDtgPlus::CompressDegreeTwoChains(
     const SpectralGraphSnapshot &input,
@@ -488,9 +522,6 @@ bool MultiDtgPlus::CompressDegreeTwoChains(
         }
     }
 
-    // Every all-degree-two connected component is a ring.  Give it three
-    // deterministic break points so its cycle cannot collapse to a self-loop
-    // or a single parallel endpoint pair.
     vector<unsigned char> component_seen(input.nodes.size(), 0U);
     for(size_t seed = 0; seed < input.nodes.size(); ++seed){
         if(component_seen[seed] != 0U) continue;
@@ -637,9 +668,6 @@ bool MultiDtgPlus::CompressDegreeTwoChains(
                     emit_segment(chain, second_break, edge_count);
             }
             else if(group.second.size() > 1U && edge_count > 1U){
-                // Parallel corridors must remain topologically distinct.  Keep
-                // one real midpoint from each compressed chain instead of
-                // silently discarding the longer route.
                 const size_t split = edge_count / 2U;
                 add_output_node(chain.nodes[split]);
                 emitted = emit_segment(chain, 0U, split) &&
@@ -661,111 +689,7 @@ bool MultiDtgPlus::CompressDegreeTwoChains(
     return true;
 }
 
-bool MultiDtgPlus::BuildSpectralGraphSnapshot(
-    const GlobalRouteContext &context, SpectralGraphSnapshot &snapshot,
-    std::string &reason){
-    if(spectral_exec_config_.graph_mode == SpectralGraphMode::ACTIVE_COMPLETE){
-        return BuildActiveCompleteSpectralGraph(context, snapshot, reason);
-    }
-    return BuildSparseSupportSpectralGraph(context, snapshot, reason);
-}
-
-bool MultiDtgPlus::CopyRawSpectralSnapshot(
-    const GlobalRouteContext &context, RawSpectralSnapshot &snapshot,
-    double &copy_ms, std::string &reason) const{
-    const SteadyClock::time_point start = SteadyClock::now();
-    snapshot = RawSpectralSnapshot();
-    snapshot.graph_version = dtg_version_;
-    snapshot.frontier_version = frontier_version_;
-    copy_ms = 0.0;
-
-    std::unordered_set<uint32_t> active_ids;
-    std::unordered_set<uint32_t> preserved_ids;
-    std::unordered_set<uint32_t> support_required_ids;
-    for(const h_ptr &h : context.active_hnodes){
-        if(h == nullptr) continue;
-        active_ids.insert(h->id_);
-        preserved_ids.insert(h->id_);
-    }
-    for(const h_ptr &h : context.seed_hnodes){
-        if(h == nullptr) continue;
-        preserved_ids.insert(h->id_);
-        support_required_ids.insert(h->id_);
-    }
-    for(const auto &root_path : context.root_paths){
-        for(const h_ptr &h : root_path.second){
-            if(h != nullptr) support_required_ids.insert(h->id_);
-        }
-    }
-
-    const double budget_ms =
-        spectral_exec_config_.main_thread_snapshot_budget_ms;
-    const auto over_budget = [&](){
-        copy_ms = ElapsedMilliseconds(start);
-        return budget_ms > 0.0 && copy_ms > budget_ms;
-    };
-
-    std::unordered_set<uint32_t> copied_node_ids;
-    size_t checked_items = 0U;
-    for(const h_ptr &h : H_list_){
-        if(h == nullptr) continue;
-        const bool frontier_attachment = !h->hf_edges_.empty();
-        snapshot.nodes.emplace_back(
-            h->id_, active_ids.count(h->id_) != 0U,
-            frontier_attachment || preserved_ids.count(h->id_) != 0U,
-            support_required_ids.count(h->id_) != 0U);
-        copied_node_ids.insert(h->id_);
-        if((++checked_items & 63U) == 0U && over_budget()){
-            reason = "raw spectral node copy exceeded main-thread budget";
-            return false;
-        }
-    }
-    if(snapshot.nodes.empty()){
-        copy_ms = ElapsedMilliseconds(start);
-        reason = "live DTG contains no H-nodes for raw spectral copy";
-        return false;
-    }
-    if(active_ids.empty()){
-        copy_ms = ElapsedMilliseconds(start);
-        reason = "raw spectral copy contains no active anchor";
-        return false;
-    }
-
-    std::unordered_set<uint64_t> copied_edge_keys;
-    for(const h_ptr &h : H_list_){
-        if(h == nullptr) continue;
-        for(const hhe_ptr &edge : h->hh_edges_){
-            if(edge == nullptr || edge->head_n_ == nullptr ||
-               edge->tail_n_ == nullptr ||
-               !std::isfinite(edge->length_) || edge->length_ <= 0.0 ||
-               edge->length_ >= kBlockedEdgeDistance) continue;
-            const uint32_t from = edge->head_n_->id_;
-            const uint32_t to = edge->tail_n_->id_;
-            if(from == to || copied_node_ids.count(from) == 0U ||
-               copied_node_ids.count(to) == 0U) continue;
-            const uint64_t key = HPairKey(from, to);
-            if(!copied_edge_keys.insert(key).second) continue;
-            const double cached_clearance = std::isfinite(edge->clearance_) &&
-                edge->clearance_ >= 0.0
-                ? edge->clearance_
-                : std::numeric_limits<double>::quiet_NaN();
-            snapshot.edges.emplace_back(
-                from, to, edge->length_, cached_clearance);
-            if((++checked_items & 63U) == 0U && over_budget()){
-                reason = "raw spectral edge copy exceeded main-thread budget";
-                return false;
-            }
-        }
-    }
-
-    copy_ms = ElapsedMilliseconds(start);
-    if(budget_ms > 0.0 && copy_ms > budget_ms){
-        reason = "raw spectral copy exceeded main-thread budget";
-        return false;
-    }
-    reason.clear();
-    return true;
-}
+// ── Region matching and persistence (simplified for V4) ──
 
 void MultiDtgPlus::MatchAndUpdatePersistentRegions(
     const SpectralResult &result, const GlobalRouteContext &context){
@@ -783,16 +707,14 @@ void MultiDtgPlus::MatchAndUpdatePersistentRegions(
     std::unordered_set<int> consumed_old_regions;
     bool created_new_region = false;
 
-    // Preserve the active execution ID only under the same Jaccard contract
-    // as every other persistent region.  A single overlapping node is not
-    // enough evidence to carry execution state across a large repartition.
+    // Preserve active region via Jaccard match
     if(active_region_id_ >= 0){
         const auto active_old = regions_.find(active_region_id_);
         if(active_old != regions_.end()){
             const double overlap0 = Jaccard(clusters[0], active_old->second.node_ids);
             const double overlap1 = Jaccard(clusters[1], active_old->second.node_ids);
             const double best_overlap = std::max(overlap0, overlap1);
-            if(best_overlap >= spectral_exec_config_.region_match_threshold){
+            if(best_overlap >= spectral_v4_config_.region_match_threshold){
                 const int chosen = overlap1 > overlap0 ? 1 : 0;
                 cluster_region[chosen] = active_region_id_;
                 consumed_old_regions.insert(active_region_id_);
@@ -812,7 +734,7 @@ void MultiDtgPlus::MatchAndUpdatePersistentRegions(
                 best_region = old_region.first;
             }
         }
-        if(best_region >= 0 && best_score >= spectral_exec_config_.region_match_threshold){
+        if(best_region >= 0 && best_score >= spectral_v4_config_.region_match_threshold){
             cluster_region[cluster] = best_region;
             consumed_old_regions.insert(best_region);
         }
@@ -824,10 +746,6 @@ void MultiDtgPlus::MatchAndUpdatePersistentRegions(
 
     std::unordered_map<int, RegionState> updated_regions;
     std::unordered_map<uint32_t, int> updated_node_regions;
-    const double f_min = result.fiedler.size() == 0 ? 0.0 : result.fiedler.minCoeff();
-    const double f_max = result.fiedler.size() == 0 ? 0.0 : result.fiedler.maxCoeff();
-    const double hysteresis_width = spectral_exec_config_.label_hysteresis *
-        std::max(f_max - f_min, spectral_config_.numeric_epsilon);
 
     for(int cluster = 0; cluster < 2; ++cluster){
         RegionState region;
@@ -846,14 +764,6 @@ void MultiDtgPlus::MatchAndUpdatePersistentRegions(
         const int raw_cluster = result.labels[i];
         if(raw_cluster != 0 && raw_cluster != 1) continue;
         int region_id = cluster_region[raw_cluster];
-        if(std::abs(result.fiedler(static_cast<Eigen::Index>(i)) -
-                    result.diagnostics.cut_threshold) <= hysteresis_width){
-            const auto previous = previous_region_ids_.find(result.h_ids[i]);
-            if(previous != previous_region_ids_.end() &&
-               updated_regions.count(previous->second) != 0U){
-                region_id = previous->second;
-            }
-        }
         updated_node_regions[result.h_ids[i]] = region_id;
         updated_regions[region_id].node_ids.insert(result.h_ids[i]);
         updated_regions[region_id].spectral_center +=
@@ -874,47 +784,17 @@ void MultiDtgPlus::MatchAndUpdatePersistentRegions(
         }
     }
 
+    // Track partition change type
     if(regions_.empty()){
         last_partition_change_ = PartitionChangeType::CREATED;
     }
+    else if(created_new_region){
+        last_partition_change_ = PartitionChangeType::RESET;
+    }
     else{
-        bool split = false;
-        for(const auto &old : regions_){
-            if(!old.second.node_ids.empty() &&
-               Jaccard(old.second.node_ids, clusters[0]) > 0.0 &&
-               Jaccard(old.second.node_ids, clusters[1]) > 0.0){
-                split = true;
-                break;
-            }
-        }
-        bool merge = false;
-        for(int cluster = 0; cluster < 2; ++cluster){
-            int overlapping_regions = 0;
-            for(const auto &old : regions_){
-                if(Jaccard(clusters[cluster], old.second.node_ids) > 0.0){
-                    ++overlapping_regions;
-                }
-            }
-            if(overlapping_regions > 1){
-                merge = true;
-                break;
-            }
-        }
-        if(split) last_partition_change_ = PartitionChangeType::SPLIT;
-        else if(merge) last_partition_change_ = PartitionChangeType::MERGE;
-        else if(created_new_region) last_partition_change_ = PartitionChangeType::RESET;
-        else last_partition_change_ = PartitionChangeType::NONE;
+        last_partition_change_ = PartitionChangeType::NONE;
     }
-    size_t shared_labels = 0U;
-    size_t changed_labels = 0U;
-    for(const auto &label : updated_node_regions){
-        const auto previous = previous_region_ids_.find(label.first);
-        if(previous == previous_region_ids_.end()) continue;
-        ++shared_labels;
-        if(previous->second != label.second) ++changed_labels;
-    }
-    last_label_change_rate_ = shared_labels == 0U ? 0.0 :
-        static_cast<double>(changed_labels) / static_cast<double>(shared_labels);
+
     regions_.swap(updated_regions);
     h_region_ids_ = updated_node_regions;
     previous_region_ids_ = updated_node_regions;
@@ -940,12 +820,12 @@ void MultiDtgPlus::UpdateRegionExecutionState(const GlobalRouteContext &context)
         }
     }
 
+    // Update frontier epoch tracking
     const bool new_frontier_epoch = last_region_frontier_epoch_ != frontier_epoch_;
     if(new_frontier_epoch){
         last_region_frontier_epoch_ = frontier_epoch_;
         for(auto &entry : regions_){
             RegionState &region = entry.second;
-            region.last_counted_frontier_epoch = frontier_epoch_;
             if(region.id == active_region_id_){
                 region.empty_streak = region.active_anchor_ids.empty()
                     ? region.empty_streak + 1 : 0;
@@ -953,13 +833,14 @@ void MultiDtgPlus::UpdateRegionExecutionState(const GlobalRouteContext &context)
         }
     }
 
+    // Mark active region as DONE when its frontiers are exhausted
     if(active_region_id_ >= 0){
         auto active = regions_.find(active_region_id_);
         if(active == regions_.end()){
             active_region_id_ = -1;
         }
         else if(active->second.empty_streak >=
-                std::max(1, spectral_exec_config_.region_done_cycles)){
+                std::max(1, spectral_v4_config_.region_done_cycles)){
             active->second.exec_state = RegionExecState::DONE;
             missed_region_set_.erase(active_region_id_);
             active_region_id_ = -1;
@@ -969,26 +850,11 @@ void MultiDtgPlus::UpdateRegionExecutionState(const GlobalRouteContext &context)
     auto region_is_viable = [&](int id){
         const auto region = regions_.find(id);
         return region != regions_.end() && !region->second.active_anchor_ids.empty() &&
-               region->second.exec_state != RegionExecState::DONE &&
-               region->second.exec_state != RegionExecState::STALE &&
-               region->second.exec_state != RegionExecState::UNREACHABLE;
+               region->second.exec_state != RegionExecState::DONE;
     };
 
-    for(auto &entry : regions_){
-        RegionState &region = entry.second;
-        if(region.active_anchor_ids.empty()) continue;
-        const bool frontier_reappeared = region.exec_state == RegionExecState::DONE;
-        const bool topology_recovered = region.exec_state == RegionExecState::UNREACHABLE &&
-            spectral_epoch_ > region.unreachable_spectral_epoch;
-        if(frontier_reappeared || topology_recovered){
-            region.exec_state = RegionExecState::DORMANT;
-            region.empty_streak = 0;
-            region.unreachable_streak = 0;
-        }
-    }
-
-    if(active_region_id_ < 0 &&
-       spectral_mode_state_.mode == SpectralMode::ACTIVE_SOFT && partition_valid_){
+    // Select next active region
+    if(active_region_id_ < 0 && partition_valid_){
         while(!missed_regions_.empty() && !region_is_viable(missed_regions_.front())){
             missed_region_set_.erase(missed_regions_.front());
             missed_regions_.pop_front();
@@ -1009,8 +875,7 @@ void MultiDtgPlus::UpdateRegionExecutionState(const GlobalRouteContext &context)
         }
     }
 
-    // Preserve still-valid missed-region order, then append newly discovered
-    // regions by increasing spectral center for deterministic backtracking.
+    // Rebuild missed-region queue
     std::deque<int> rebuilt;
     std::unordered_set<int> rebuilt_set;
     for(const int id : missed_regions_){
@@ -1054,312 +919,7 @@ void MultiDtgPlus::PublishSpectralStateToHnodes(const SpectralResult &result){
     }
 }
 
-bool MultiDtgPlus::NeedSpectralUpdate(const GlobalRouteContext &context,
-    double now) const{
-    if(!spectral_exec_config_.enabled || spectral_job_running_ ||
-       now < spectral_cooldown_until_ || late_stage_active_ ||
-       spectral_mode_state_.mode == SpectralMode::RECOVERY){
-        return false;
-    }
-    const double elapsed = last_spectral_update_time_ < 0.0
-        ? std::numeric_limits<double>::infinity()
-        : now - last_spectral_update_time_;
-    if(elapsed + spectral_config_.numeric_epsilon <
-       spectral_exec_config_.spectral_min_update_interval){
-        return false;
-    }
-    if((spectral_graph_eligible_ && !last_spectral_result_.success()) ||
-       elapsed >= spectral_exec_config_.spectral_max_update_interval){
-        return true;
-    }
-    const size_t anchor_delta = context.active_hnodes.size() > last_submitted_anchor_count_
-        ? context.active_hnodes.size() - last_submitted_anchor_count_
-        : last_submitted_anchor_count_ - context.active_hnodes.size();
-    return anchor_delta >= static_cast<size_t>(spectral_exec_config_.dirty_node_changes) ||
-        frontier_changes_since_submit_ >= static_cast<uint64_t>(
-            spectral_exec_config_.dirty_node_changes) ||
-        topology_changes_since_submit_ >= static_cast<uint64_t>(
-            spectral_exec_config_.dirty_edge_changes);
-}
-
-void MultiDtgPlus::SubmitSpectralJobAsync(
-    const GlobalRouteContext &context, double now, std::string &reason){
-    if(spectral_job_running_) return;
-
-    // A newly submitted job owns a fresh timing record.  Until the worker is
-    // consumed, unset stages remain zero instead of leaking values from the
-    // previous spectral epoch into the current diagnostic row.
-    last_spectral_stage_timings_ = SpectralStageTimings();
-    RawSpectralSnapshot raw_snapshot;
-    double raw_copy_ms = 0.0;
-    if(!CopyRawSpectralSnapshot(
-           context, raw_snapshot, raw_copy_ms, reason)){
-        spectral_fallback_this_cycle_ = true;
-        last_spectral_stage_timings_.raw_copy_ms = raw_copy_ms;
-        const bool budget_overrun =
-            spectral_exec_config_.main_thread_snapshot_budget_ms > 0.0 &&
-            raw_copy_ms >
-                spectral_exec_config_.main_thread_snapshot_budget_ms;
-        if(budget_overrun){
-            ++main_snapshot_overrun_count_;
-            ++timed_out_spectral_results_;
-            ++consecutive_main_snapshot_overruns_;
-            if(consecutive_main_snapshot_overruns_ >=
-               spectral_exec_config_.over_budget_limit){
-                spectral_cooldown_until_ = now +
-                    spectral_exec_config_.cooldown_duration;
-                ++spectral_cooldown_count_;
-                consecutive_main_snapshot_overruns_ = 0;
-                reason += "; entered spectral submission cooldown";
-            }
-        }
-        else{
-            consecutive_main_snapshot_overruns_ = 0;
-            spectral_graph_eligible_ = false;
-        }
-        last_spectral_update_time_ = now;
-        UpdateSpectralRuntimeMode(false, false, now);
-        return;
-    }
-    consecutive_main_snapshot_overruns_ = 0;
-    last_spectral_stage_timings_.raw_copy_ms = raw_copy_ms;
-    last_raw_spectral_node_count_ = raw_snapshot.nodes.size();
-    spectral_graph_eligible_ = true;
-
-    const uint64_t submitted_dtg = dtg_version_;
-    const uint64_t submitted_frontier = frontier_version_;
-    SpectralSnapshotBuildConfig build_config;
-    build_config.support_mode =
-        spectral_exec_config_.graph_mode == SpectralGraphMode::ACTIVE_COMPLETE
-        ? SpectralSupportMode::ACTIVE_COMPLETE
-        : SpectralSupportMode::SUPPORT_SPARSE;
-    build_config.knn = static_cast<size_t>(
-        std::max(1, spectral_exec_config_.spectral_knn));
-    build_config.corridor_compression =
-        spectral_exec_config_.corridor_compression;
-    build_config.weight_mode = spectral_config_.weight_mode;
-    build_config.compute_betweenness =
-        spectral_config_.weight_mode ==
-        SpectralWeightMode::DISTANCE_CLEARANCE_BETWEENNESS;
-    build_config.min_spectral_nodes = spectral_config_.min_spectral_nodes;
-    build_config.max_spectral_nodes = spectral_config_.max_spectral_nodes;
-    build_config.numeric_epsilon = spectral_config_.numeric_epsilon;
-
-    SpectralRouter router = spectral_router_;
-    FiedlerHistory history = previous_fiedler_;
-    const PartitionConfidenceConfig confidence_config =
-        partition_confidence_config_;
-    const double submitted_lambda2_ema = lambda2_ema_;
-    const bool submitted_lambda2_ema_initialized =
-        lambda2_ema_initialized_;
-    const double numeric_epsilon = spectral_config_.numeric_epsilon;
-    spectral_future_ = std::async(std::launch::async,
-        [router, raw_snapshot = std::move(raw_snapshot), build_config,
-         history, confidence_config, submitted_lambda2_ema,
-         submitted_lambda2_ema_initialized, numeric_epsilon,
-         submitted_dtg, submitted_frontier, now, raw_copy_ms]() mutable {
-            SpectralAsyncOutput output;
-            output.dtg_version = submitted_dtg;
-            output.frontier_version = submitted_frontier;
-            output.submitted_time = now;
-            const SteadyClock::time_point worker_start =
-                SteadyClock::now();
-            output.worker = DTGPlus::BuildAndSolveSpectral(
-                raw_snapshot, build_config, router, history);
-            output.worker.timings.raw_copy_ms = raw_copy_ms;
-            output.worker.build.timings.raw_copy_ms = raw_copy_ms;
-            if(output.worker.result.has_valid_cut()){
-                const SteadyClock::time_point confidence_start =
-                    SteadyClock::now();
-                const PartitionEvidence evidence =
-                    BuildPartitionEvidenceValue(
-                        output.worker.result,
-                        output.worker.build.snapshot,
-                        submitted_lambda2_ema,
-                        submitted_lambda2_ema_initialized,
-                        numeric_epsilon);
-                output.confidence = ComputePartitionConfidence(
-                    evidence, confidence_config);
-                output.confidence_ms =
-                    ElapsedMilliseconds(confidence_start);
-                output.worker.timings.confidence_ms =
-                    output.confidence_ms;
-                output.worker.build.timings.confidence_ms =
-                    output.confidence_ms;
-            }
-            output.worker.timings.worker_total_ms =
-                ElapsedMilliseconds(worker_start);
-            output.worker.build.timings.worker_total_ms =
-                output.worker.timings.worker_total_ms;
-            return output;
-        });
-    spectral_job_running_ = true;
-    ++submitted_spectral_jobs_;
-    last_submitted_dtg_version_ = submitted_dtg;
-    last_submitted_frontier_version_ = submitted_frontier;
-    last_submitted_anchor_count_ = context.active_hnodes.size();
-    topology_changes_since_submit_ = 0;
-    frontier_changes_since_submit_ = 0;
-    last_spectral_update_time_ = now;
-    spectral_dirty_ = false;
-}
-
-PartitionEvidence MultiDtgPlus::BuildPartitionEvidence(
-    const SpectralResult &result,
-    const SpectralGraphSnapshot &snapshot) const{
-    return BuildPartitionEvidenceValue(
-        result, snapshot, lambda2_ema_, lambda2_ema_initialized_,
-        spectral_config_.numeric_epsilon);
-}
-
-void MultiDtgPlus::ConsumeSpectralResult(
-    const GlobalRouteContext &context, double now, std::string &reason){
-    if(!spectral_job_running_) return;
-    const std::future_status status = spectral_future_.wait_for(
-        std::chrono::milliseconds(0));
-    if(status != std::future_status::ready) return;
-
-    SpectralAsyncOutput output = spectral_future_.get();
-    spectral_job_running_ = false;
-    last_spectral_stage_timings_ = output.worker.timings;
-    last_spectral_stage_timings_.confidence_ms = output.confidence_ms;
-
-    const double worker_ms = output.worker.timings.worker_total_ms;
-    const bool worker_overrun =
-        spectral_exec_config_.worker_warning_budget_ms > 0.0 &&
-        std::isfinite(worker_ms) &&
-        worker_ms > spectral_exec_config_.worker_warning_budget_ms;
-    if(worker_overrun){
-        ++worker_budget_overrun_count_;
-        ++timed_out_spectral_results_;
-        ++consecutive_worker_budget_overruns_;
-        if(consecutive_worker_budget_overruns_ >=
-           spectral_exec_config_.over_budget_limit){
-            spectral_cooldown_until_ = now +
-                spectral_exec_config_.cooldown_duration;
-            ++spectral_cooldown_count_;
-            consecutive_worker_budget_overruns_ = 0;
-            UpdateSpectralRuntimeMode(false, false, now);
-            reason = "spectral worker exceeded warning budget repeatedly; "
-                "entered submission cooldown";
-        }
-    }
-    else{
-        consecutive_worker_budget_overruns_ = 0;
-    }
-
-    if(output.dtg_version != dtg_version_ ||
-       output.frontier_version != frontier_version_){
-        spectral_fallback_this_cycle_ = true;
-        ++stale_spectral_results_;
-        partition_confidence_result_ = PartitionConfidenceResult();
-        // A stream of stale jobs is weak evidence, not permission to retain an
-        // old partition forever.  The normal off-persistence/grace policy
-        // handles deactivation while the global TTL blocks use immediately.
-        UpdateSpectralRuntimeMode(true, false, now);
-        reason = "discarded stale asynchronous spectral result";
-        return;
-    }
-    if(!output.worker.build.success()){
-        spectral_fallback_this_cycle_ = true;
-        spectral_graph_eligible_ = false;
-        reason = std::string(SpectralSnapshotBuildStatusName(
-            output.worker.build.status)) + ": " +
-            output.worker.build.reason;
-        partition_confidence_result_ = PartitionConfidenceResult();
-        ++no_cut_epochs_;
-        UpdateSpectralRuntimeMode(false, false, now);
-        return;
-    }
-    if(!output.worker.result.success()){
-        spectral_fallback_this_cycle_ = true;
-        reason = std::string(SpectralSolveStatusName(
-            output.worker.result.status)) + ": " +
-            output.worker.result.diagnostics.reason;
-        partition_confidence_result_ = PartitionConfidenceResult();
-        ++no_cut_epochs_;
-        UpdateSpectralRuntimeMode(true, false, now);
-        return;
-    }
-
-    spectral_graph_eligible_ = true;
-    ++spectral_epoch_;
-    last_spectral_result_ = std::move(output.worker.result);
-    last_spectral_snapshot_ = std::move(output.worker.build.snapshot);
-    last_raw_spectral_node_count_ =
-        output.worker.build.raw_node_count;
-    last_compressed_spectral_node_count_ = last_spectral_snapshot_.nodes.size();
-
-    if(last_spectral_result_.has_valid_cut()){
-        partition_confidence_result_ = output.confidence;
-        no_cut_epochs_ = 0;
-    }
-    else{
-        partition_confidence_result_ = PartitionConfidenceResult();
-        ++no_cut_epochs_;
-        reason = "spectral solve found no useful cut; retained original EOHDT";
-    }
-    lambda2_ema_ = UpdateLambda2Ema(last_spectral_result_.diagnostics.lambda2,
-        lambda2_ema_initialized_ ? lambda2_ema_
-                                 : std::numeric_limits<double>::quiet_NaN(),
-        spectral_exec_config_.lambda2_ema_alpha);
-    lambda2_ema_initialized_ = std::isfinite(lambda2_ema_);
-
-    if(last_spectral_result_.has_valid_cut() &&
-       partition_confidence_result_.confidence >=
-       spectral_exec_config_.partition_confidence_off){
-        stable_spectral_result_ = last_spectral_result_;
-        last_spectral_dtg_version_ = output.dtg_version;
-        last_spectral_frontier_version_ = output.frontier_version;
-        previous_fiedler_ = stable_spectral_result_.fiedler_by_h_id;
-        const int previous_active_region = active_region_id_;
-        MatchAndUpdatePersistentRegions(stable_spectral_result_, context);
-        PublishSpectralStateToHnodes(stable_spectral_result_);
-        const bool active_region_lost = previous_active_region >= 0 &&
-            regions_.count(previous_active_region) == 0U;
-        const bool large_label_change = last_label_change_rate_ >=
-            spectral_exec_config_.region_match_threshold;
-        if(previous_active_region >= 0 &&
-           (active_region_lost || large_label_change ||
-            last_partition_change_ == PartitionChangeType::RESET)){
-            EnterRecovery(RecoveryReason::PARTITION_CHANGE, now);
-        }
-    }
-    UpdateRegionExecutionState(context);
-}
-
-void MultiDtgPlus::UpdateSpectralRuntimeMode(bool eligible,
-    bool route_acceptable, double now){
-    SpectralModeInput input;
-    input.enabled = spectral_exec_config_.enabled;
-    input.eligible = eligible;
-    input.recovery_requested = recovery_requested_;
-    input.recovery_complete = spectral_mode_state_.mode == SpectralMode::RECOVERY &&
-        now >= recovery_until_;
-    input.route_acceptable = route_acceptable;
-    input.partition_confidence = partition_confidence_result_.confidence;
-    const SpectralModeUpdate update = DTGPlus::UpdateSpectralMode(
-        spectral_mode_state_, input, spectral_mode_config_);
-    spectral_mode_state_ = update.state;
-    if(update.mode_changed) ++spectral_mode_toggle_count_;
-    recovery_requested_ = false;
-    partition_valid_ = spectral_mode_state_.mode == SpectralMode::ACTIVE_SOFT;
-    if(update.deactivated || spectral_mode_state_.mode == SpectralMode::DISABLED){
-        active_region_id_ = -1;
-    }
-    if(update.exited_recovery){
-        recovery_reason_ = RecoveryReason::NONE;
-    }
-}
-
-void MultiDtgPlus::EnterRecovery(RecoveryReason reason, double now){
-    if(spectral_mode_state_.mode != SpectralMode::RECOVERY) ++recovery_count_;
-    recovery_reason_ = reason;
-    recovery_until_ = std::max(recovery_until_,
-        now + spectral_exec_config_.recovery_duration);
-    recovery_requested_ = true;
-    UpdateSpectralRuntimeMode(true, false, now);
-}
+// ── Region quotient target selection (V4.1 core) ──
 
 int MultiDtgPlus::RegionForHnode(const h_ptr &h) const{
     if(h == nullptr) return -1;
@@ -1385,14 +945,7 @@ double MultiDtgPlus::ContextRouteDistance(
     if(from_index == context.active_index.end()){
         return std::numeric_limits<double>::infinity();
     }
-    const Eigen::Index row = static_cast<Eigen::Index>(from_index->second + 1U);
-    const Eigen::Index column = static_cast<Eigen::Index>(to_index->second + 1U);
-    if(row < context.distance_matrix.rows() && column < context.distance_matrix.cols()){
-        const double exact = context.distance_matrix(row, column);
-        if(std::isfinite(exact) && exact < kUnreachableDistance) return exact;
-    }
-    // The robot-root star is a conservative valid upper bound when a direct
-    // pair was deliberately not materialized by the kNN support policy.
+    // Use root-path star as upper bound for inter-anchor distance
     if(from_index->second < context.root_paths.size() &&
        to_index->second < context.root_paths.size()){
         return context.root_paths[from_index->second].first +
@@ -1401,348 +954,296 @@ double MultiDtgPlus::ContextRouteDistance(
     return std::numeric_limits<double>::infinity();
 }
 
-RouteMetrics MultiDtgPlus::ComputeRouteMetrics(
-    const GlobalRouteContext &context, const vector<h_ptr> &route) const{
-    RouteMetrics metrics;
-    if(route.empty()) return metrics;
-    metrics.path_cost = 0.0;
-    h_ptr previous;
-    int previous_region = active_region_id_;
-    std::unordered_set<int> visited_regions;
-    if(previous_region >= 0) visited_regions.insert(previous_region);
-    for(const h_ptr &h : route){
-        const double leg = ContextRouteDistance(context, previous, h);
-        if(!std::isfinite(leg) || leg >= kUnreachableDistance){
-            metrics.path_cost = std::numeric_limits<double>::infinity();
-            return metrics;
-        }
-        metrics.path_cost += leg;
-        const int region = RegionForHnode(h);
-        if(region >= 0){
-            if(previous_region >= 0 && region != previous_region){
-                ++metrics.switch_count;
-                if(visited_regions.count(region) != 0U){
-                    metrics.revisit_distance += leg;
+bool MultiDtgPlus::SelectTargetFromQuotientGraph(
+    const GlobalRouteContext &context, h_ptr &target,
+    std::string &reason) const{
+    target = nullptr;
+    if(!partition_valid_ || regions_.empty()){
+        reason = "no valid partition for quotient-graph selection";
+        return false;
+    }
+
+    // Find the closest region with active anchors
+    int target_region = active_region_id_;
+    if(target_region < 0 || regions_.count(target_region) == 0U){
+        double best_distance = std::numeric_limits<double>::infinity();
+        for(const auto &entry : regions_){
+            if(entry.second.exec_state == RegionExecState::DONE) continue;
+            if(entry.second.active_anchor_ids.empty()) continue;
+            // Find the closest anchor in this region
+            for(const auto &h : context.active_hnodes){
+                if(h == nullptr) continue;
+                if(entry.second.active_anchor_ids.count(h->id_)){
+                    const double d = ContextRouteDistance(context, nullptr, h);
+                    if(d < best_distance){
+                        best_distance = d;
+                        target_region = entry.first;
+                    }
+                    break;
                 }
             }
-            visited_regions.insert(region);
-            previous_region = region;
         }
-        previous = h;
     }
-    return metrics;
-}
 
-double MultiDtgPlus::EstimateReturnProbability(
-    const GlobalRouteContext &context) const{
-    if(context.active_hnodes.empty()) return 0.0;
-    int reference_region = active_region_id_;
-    if(reference_region < 0){
-        double closest = std::numeric_limits<double>::infinity();
-        for(const h_ptr &h : context.active_hnodes){
-            const int region = RegionForHnode(h);
-            const double distance = ContextRouteDistance(context, nullptr, h);
-            if(region >= 0 && distance < closest){
-                closest = distance;
-                reference_region = region;
-            }
-        }
+    if(target_region < 0){
+        reason = "no viable region in quotient graph";
+        return false;
     }
-    if(reference_region < 0) return 0.0;
-    size_t current_region_frontiers = 0U;
-    size_t all_frontiers = 0U;
-    std::unordered_set<uint32_t> counted;
-    for(const h_ptr &h : context.active_hnodes){
+
+    // Select the best anchor within the target region
+    double best_score = -std::numeric_limits<double>::infinity();
+    for(const auto &h : context.active_hnodes){
         if(h == nullptr) continue;
-        for(const hfe_ptr &edge : h->hf_edges_){
-            if(edge == nullptr || edge->tail_n_ == nullptr) continue;
-            const uint32_t fid = edge->tail_n_->fid_;
-            if(!counted.insert(fid).second) continue;
-            if(EROI_ == nullptr || fid >= EROI_->EROI_.size()) continue;
-            const auto runtime = frontier_runtime_.find(fid);
-            if(runtime != frontier_runtime_.end() &&
-               (runtime->second.state == FrontierState::QUARANTINED ||
-                runtime->second.state == FrontierState::DEAD_FRONTIER)) continue;
-            ++all_frontiers;
-            const int owner = runtime == frontier_runtime_.end()
-                ? RegionForHnode(h) : runtime->second.owner_region;
-            if(owner == reference_region) ++current_region_frontiers;
+        if(RegionForHnode(h) != target_region) continue;
+        if(!HasEffectiveFrontier(h, target_region)) continue;
+        const double d = ContextRouteDistance(context, nullptr, h);
+        if(!std::isfinite(d) || d <= 0.0) continue;
+        const double gain = static_cast<double>(h->hf_edges_.size());
+        const double score = gain / d;
+        if(score > best_score){
+            best_score = score;
+            target = h;
         }
     }
-    return all_frontiers == 0U ? 0.0 : Clamp01(
-        static_cast<double>(current_region_frontiers) /
-        static_cast<double>(all_frontiers));
+
+    if(target == nullptr){
+        reason = "no reachable anchor in target region " + std::to_string(target_region);
+        return false;
+    }
+
+    reason = "quotient-graph selected target in region " + std::to_string(target_region);
+    return true;
 }
 
-bool MultiDtgPlus::BuildSpectralFirstTargetRoute(
-    const GlobalRouteContext &context, const vector<h_ptr> &baseline_route,
-    vector<h_ptr> &route_h, double switch_penalty,
-    size_t &selected_baseline_index, double &baseline_first_distance,
-    double &candidate_first_distance, std::string &reason) const{
-    route_h = baseline_route;
-    selected_baseline_index = 0U;
-    baseline_first_distance = std::numeric_limits<double>::infinity();
-    candidate_first_distance = std::numeric_limits<double>::infinity();
-    if(baseline_route.empty() || baseline_route.front() == nullptr){
-        reason = "EOHDT baseline contains no first anchor";
+// ── V4.2: Local APPR fallback ──
+
+bool MultiDtgPlus::ComputeLocalAPPRFallback(
+    const GlobalRouteContext &context,
+    const Eigen::Vector3d &robot_pos, h_ptr &target,
+    std::string &reason) const{
+    target = nullptr;
+
+    // Use seed H-nodes as the local neighborhood center.
+    // APPR would normally spread from the robot's closest graph nodes, but
+    // the seed nodes already represent the reachable local neighborhood.
+    if(context.seed_hnodes.empty()){
+        reason = "no seed nodes for local APPR fallback";
         return false;
     }
 
-    baseline_first_distance = ContextRouteDistance(
-        context, nullptr, baseline_route.front());
-    if(!std::isfinite(baseline_first_distance) ||
-       baseline_first_distance >= kUnreachableDistance){
-        reason = "EOHDT first anchor has no exact robot path distance";
+    // Collect all H-nodes within the local neighborhood (already computed
+    // via ParallelDijkstra in context.active_hnodes, sorted by root distance).
+    // Select the top-k closest active anchors.
+    const int top_k = spectral_v4_config_.local_frontier_top_k;
+    vector<pair<double, h_ptr>> local_candidates;
+    local_candidates.reserve(context.active_hnodes.size());
+    for(const auto &h : context.active_hnodes){
+        if(h == nullptr || !HasEffectiveFrontier(h)) continue;
+        const double d = ContextRouteDistance(context, nullptr, h);
+        if(std::isfinite(d) && d > 0.0){
+            local_candidates.emplace_back(d, h);
+        }
+    }
+
+    if(local_candidates.empty()){
+        reason = "no local candidates for APPR fallback";
         return false;
     }
 
-    const size_t top_k = std::min(
-        baseline_route.size(), static_cast<size_t>(std::max(
-            1, spectral_exec_config_.spectral_first_target_top_k)));
-    if(top_k <= 1U || active_region_id_ < 0){
-        candidate_first_distance = baseline_first_distance;
+    // Sort by distance and keep top-k
+    std::sort(local_candidates.begin(), local_candidates.end(),
+        [](const pair<double, h_ptr> &a, const pair<double, h_ptr> &b){
+            return a.first < b.first;
+        });
+
+    const size_t keep = std::min(local_candidates.size(),
+        static_cast<size_t>(top_k));
+    local_candidates.resize(keep);
+
+    // Among the top-k closest, pick the one with the best gain/distance ratio
+    double best_score = -std::numeric_limits<double>::infinity();
+    for(const auto &candidate : local_candidates){
+        const double gain = static_cast<double>(candidate.second->hf_edges_.size());
+        const double score = std::log1p(gain) / std::max(candidate.first, 1.0);
+        if(score > best_score){
+            best_score = score;
+            target = candidate.second;
+        }
+    }
+
+    if(target == nullptr){
+        reason = "local APPR fallback found no viable target";
+        return false;
+    }
+
+    reason = "local APPR fallback selected target at distance "
+        + std::to_string(ContextRouteDistance(context, nullptr, target));
+    return true;
+}
+
+// ── Async spectral job management ──
+
+bool MultiDtgPlus::NeedSpectralUpdate(const GlobalRouteContext &context,
+    double now) const{
+    if(!spectral_v4_config_.enabled || spectral_job_running_){
+        return false;
+    }
+    const double elapsed = last_spectral_update_time_ < 0.0
+        ? std::numeric_limits<double>::infinity()
+        : now - last_spectral_update_time_;
+    if(elapsed + spectral_config_.numeric_epsilon <
+       spectral_v4_config_.spectral_min_update_interval){
+        return false;
+    }
+    if(!spectral_graph_eligible_ || !last_spectral_result_.success()){
         return true;
     }
-    vector<double> robot_distances;
-    vector<int> region_ids;
-    robot_distances.reserve(top_k);
-    region_ids.reserve(top_k);
-    for(size_t index = 0; index < top_k; ++index){
-        const h_ptr &candidate = baseline_route[index];
-        // root_paths is populated by the robot-seeded Dijkstra and therefore
-        // provides the exact robot-to-anchor DTG distance for every candidate.
-        robot_distances.push_back(candidate == nullptr
-            ? std::numeric_limits<double>::infinity()
-            : ContextRouteDistance(context, nullptr, candidate));
-        region_ids.push_back(candidate == nullptr
-            ? -1 : RegionForHnode(candidate));
+    if(elapsed >= spectral_v4_config_.spectral_max_update_interval){
+        return true;
     }
-    const FirstTargetChoice choice = ChooseFirstTargetFromEohdtPrefix(
-        robot_distances, region_ids, top_k, active_region_id_,
-        switch_penalty,
-        spectral_exec_config_.first_target_switch_penalty_scale,
-        spectral_exec_config_.first_target_max_regret,
-        spectral_config_.numeric_epsilon);
-    if(!choice.valid ||
-       choice.selected_distance >= kUnreachableDistance){
-        reason = "no reachable first-target candidate in EOHDT prefix";
+    const size_t anchor_delta = context.active_hnodes.size() > last_submitted_anchor_count_
+        ? context.active_hnodes.size() - last_submitted_anchor_count_
+        : last_submitted_anchor_count_ - context.active_hnodes.size();
+    return anchor_delta >= static_cast<size_t>(spectral_v4_config_.dirty_node_changes) ||
+        frontier_changes_since_submit_ >= static_cast<uint64_t>(
+            spectral_v4_config_.dirty_node_changes) ||
+        topology_changes_since_submit_ >= static_cast<uint64_t>(
+            spectral_v4_config_.dirty_edge_changes);
+}
+
+void MultiDtgPlus::SubmitSpectralJobAsync(
+    const GlobalRouteContext &context, double now, std::string &reason){
+    if(spectral_job_running_) return;
+    const double build_start = ros::WallTime::now().toSec();
+    SpectralGraphSnapshot snapshot;
+    if(!BuildSpectralGraphSnapshot(context, snapshot, reason)){
+        spectral_graph_eligible_ = false;
+        last_spectral_update_time_ = now;
+        return;
+    }
+    const double build_ms = (ros::WallTime::now().toSec() - build_start) * 1000.0;
+    if(snapshot.nodes.size() < spectral_config_.min_spectral_nodes){
+        std::ostringstream stream;
+        stream << "support graph has only " << snapshot.nodes.size()
+               << " nodes; waiting for more topology";
+        reason = stream.str();
+        spectral_graph_eligible_ = false;
+        last_spectral_update_time_ = now;
+        return;
+    }
+
+    // Check against skeleton budget
+    if(static_cast<int>(snapshot.nodes.size()) >
+       spectral_v4_config_.skeleton_max_nodes){
+        std::ostringstream stream;
+        stream << "support graph has " << snapshot.nodes.size()
+               << " nodes after compression, over skeleton budget "
+               << spectral_v4_config_.skeleton_max_nodes
+               << "; will use local fallback";
+        reason = stream.str();
+        spectral_graph_eligible_ = false;
+        last_spectral_update_time_ = now;
+        return;
+    }
+
+    spectral_graph_eligible_ = true;
+
+    const uint64_t submitted_dtg = dtg_version_;
+    const uint64_t submitted_frontier = frontier_version_;
+    const size_t raw_nodes = last_raw_spectral_node_count_;
+    SpectralRouter router = spectral_router_;
+    FiedlerHistory history = previous_fiedler_;
+    spectral_future_ = std::async(std::launch::async,
+        [router, snapshot, history, submitted_dtg, submitted_frontier,
+         raw_nodes, now, build_ms]() mutable {
+            SpectralAsyncOutput output;
+            output.snapshot = std::move(snapshot);
+            output.dtg_version = submitted_dtg;
+            output.frontier_version = submitted_frontier;
+            output.raw_node_count = raw_nodes;
+            output.submitted_time = now;
+            output.snapshot_build_ms = build_ms;
+            output.result = router.Solve(output.snapshot, history);
+            return output;
+        });
+    spectral_job_running_ = true;
+    ++submitted_spectral_jobs_;
+    last_submitted_dtg_version_ = submitted_dtg;
+    last_submitted_frontier_version_ = submitted_frontier;
+    last_submitted_anchor_count_ = context.active_hnodes.size();
+    topology_changes_since_submit_ = 0;
+    frontier_changes_since_submit_ = 0;
+    last_spectral_update_time_ = now;
+    spectral_dirty_ = false;
+}
+
+bool MultiDtgPlus::ConsumeSpectralResult(
+    const GlobalRouteContext &context, double now, std::string &reason){
+    if(!spectral_job_running_) return false;
+    const std::future_status status = spectral_future_.wait_for(
+        std::chrono::milliseconds(0));
+    if(status != std::future_status::ready) return false;
+
+    SpectralAsyncOutput output = spectral_future_.get();
+    spectral_job_running_ = false;
+    if(output.dtg_version != dtg_version_ ||
+       output.frontier_version != frontier_version_){
+        ++stale_spectral_results_;
+        reason = "discarded stale asynchronous spectral result";
         return false;
     }
-    selected_baseline_index = choice.baseline_index;
-    baseline_first_distance = choice.baseline_distance;
-    candidate_first_distance = choice.selected_distance;
-    if(selected_baseline_index == 0U) return true;
+    if(!output.result.success()){
+        spectral_graph_eligible_ = false;
+        reason = std::string(SpectralSolveStatusName(output.result.status)) +
+            ": " + output.result.diagnostics.reason;
+        return false;
+    }
 
-    const h_ptr selected = baseline_route[selected_baseline_index];
-    route_h.erase(route_h.begin() +
-        static_cast<std::ptrdiff_t>(selected_baseline_index));
-    route_h.insert(route_h.begin(), selected);
+    ++spectral_epoch_;
+    output.result.diagnostics.total_time_ms += output.snapshot_build_ms;
+    last_spectral_result_ = std::move(output.result);
+    last_spectral_snapshot_ = std::move(output.snapshot);
+    last_raw_spectral_node_count_ = output.raw_node_count;
+    last_compressed_spectral_node_count_ = last_spectral_snapshot_.nodes.size();
+
+    // Update EMA
+    lambda2_ema_ = UpdateLambda2Ema(last_spectral_result_.diagnostics.lambda2,
+        lambda2_ema_initialized_ ? lambda2_ema_
+                                 : std::numeric_limits<double>::quiet_NaN(),
+        spectral_v4_config_.lambda2_ema_alpha);
+    lambda2_ema_initialized_ = std::isfinite(lambda2_ema_);
+
+    if(last_spectral_result_.has_valid_cut()){
+        // Accept the result if Ncut is below threshold
+        if(last_spectral_result_.diagnostics.ncut <=
+           spectral_v4_config_.ncut_threshold){
+            stable_spectral_result_ = last_spectral_result_;
+            last_spectral_dtg_version_ = output.dtg_version;
+            last_spectral_frontier_version_ = output.frontier_version;
+            previous_fiedler_ = stable_spectral_result_.fiedler_by_h_id;
+            MatchAndUpdatePersistentRegions(stable_spectral_result_, context);
+            PublishSpectralStateToHnodes(stable_spectral_result_);
+            partition_valid_ = true;
+            reason = "spectral cut accepted (Ncut="
+                + std::to_string(last_spectral_result_.diagnostics.ncut) + ")";
+        }
+        else{
+            partition_valid_ = false;
+            reason = "spectral cut rejected: Ncut "
+                + std::to_string(last_spectral_result_.diagnostics.ncut)
+                + " > threshold " + std::to_string(spectral_v4_config_.ncut_threshold);
+        }
+    }
+    else{
+        partition_valid_ = false;
+        reason = "spectral solve found no valid cut";
+    }
+
+    UpdateRegionExecutionState(context);
     return true;
 }
 
-bool MultiDtgPlus::HasRawReachableFrontier(const h_ptr &h) const{
-    if(h == nullptr || EROI_ == nullptr) return false;
-    for(const hfe_ptr &edge : h->hf_edges_){
-        if(edge == nullptr || edge->tail_n_ == nullptr ||
-           !std::isfinite(edge->length_) ||
-           edge->length_ >= kBlockedEdgeDistance) continue;
-        const uint32_t fid = edge->tail_n_->fid_;
-        const uint8_t vid = edge->tail_n_->vid_;
-        if(fid >= EROI_->EROI_.size()) continue;
-        const auto &frontier = EROI_->EROI_[fid];
-        if(frontier.f_state_ == 1U && vid < frontier.local_vps_.size() &&
-           frontier.local_vps_[vid] == 1U){
-            return true;
-        }
-    }
-    return false;
-}
-
-size_t MultiDtgPlus::RawReachableFrontierCount(
-    const GlobalRouteContext *context, double *total_gain) const{
-    if(total_gain != nullptr) *total_gain = 0.0;
-    if(EROI_ == nullptr) return 0U;
-    std::unordered_set<uint32_t> counted;
-    auto collect = [&](const h_ptr &h){
-        if(h == nullptr) return;
-        for(const hfe_ptr &edge : h->hf_edges_){
-            if(edge == nullptr || edge->tail_n_ == nullptr ||
-               !std::isfinite(edge->length_) ||
-               edge->length_ >= kBlockedEdgeDistance) continue;
-            const uint32_t fid = edge->tail_n_->fid_;
-            const uint8_t vid = edge->tail_n_->vid_;
-            if(fid >= EROI_->EROI_.size()) continue;
-            const auto &frontier = EROI_->EROI_[fid];
-            if(frontier.f_state_ == 1U &&
-               vid < frontier.local_vps_.size() &&
-               frontier.local_vps_[vid] == 1U){
-                counted.insert(fid);
-            }
-        }
-    };
-    if(context != nullptr){
-        const vector<h_ptr> &raw_hnodes =
-            context->raw_reachable_hnodes.empty()
-            ? context->active_hnodes
-            : context->raw_reachable_hnodes;
-        for(const h_ptr &h : raw_hnodes) collect(h);
-    }
-    else{
-        for(const h_ptr &h : H_list_) collect(h);
-    }
-    if(total_gain != nullptr){
-        for(const uint32_t fid : counted){
-            *total_gain += std::max(0, EROI_->EROI_[fid].unknown_num_);
-        }
-    }
-    return counted.size();
-}
-
-size_t MultiDtgPlus::ActionableFrontierCount(
-    const GlobalRouteContext *context, double *total_gain) const{
-    if(total_gain != nullptr) *total_gain = 0.0;
-    if(EROI_ == nullptr) return 0U;
-    std::unordered_set<uint32_t> counted;
-    auto collect = [&](const h_ptr &h){
-        if(h == nullptr) return;
-        for(const hfe_ptr &edge : h->hf_edges_){
-            if(edge == nullptr || edge->tail_n_ == nullptr ||
-               !std::isfinite(edge->length_) ||
-               edge->length_ >= kBlockedEdgeDistance) continue;
-            const uint32_t fid = edge->tail_n_->fid_;
-            const uint8_t vid = edge->tail_n_->vid_;
-            if(fid >= EROI_->EROI_.size()) continue;
-            const auto &frontier = EROI_->EROI_[fid];
-            if(frontier.f_state_ != 1U ||
-               vid >= frontier.local_vps_.size() ||
-               frontier.local_vps_[vid] != 1U) continue;
-            const auto runtime = frontier_runtime_.find(fid);
-            if(runtime != frontier_runtime_.end() &&
-               (runtime->second.state == FrontierState::QUARANTINED ||
-                runtime->second.state == FrontierState::DEAD_FRONTIER)) continue;
-            counted.insert(fid);
-        }
-    };
-    if(context != nullptr){
-        for(const h_ptr &h : context->active_hnodes) collect(h);
-    }
-    else{
-        for(const h_ptr &h : H_list_) collect(h);
-    }
-    if(total_gain != nullptr){
-        for(const uint32_t fid : counted){
-            *total_gain += std::max(0, EROI_->EROI_[fid].unknown_num_);
-        }
-    }
-    return counted.size();
-}
-
-bool MultiDtgPlus::RestoreClosestRawFrontier(
-    const Eigen::Vector3d &ps, GlobalRouteContext &context,
-    std::string &reason){
-    GlobalRouteContext raw_context = context;
-    if(raw_context.raw_reachable_hnodes.empty()){
-        collect_raw_frontiers_ = true;
-        const GlobalPlanStatus raw_status = CollectActiveBoundaryRegions(
-            ps, raw_context, true);
-        collect_raw_frontiers_ = false;
-        if(raw_status != GlobalPlanStatus::SUCCESS){
-            reason =
-                "fail-open could not collect a robot-reachable raw frontier";
-            return false;
-        }
-    }
-
-    vector<uint32_t> candidate_frontiers;
-    vector<double> candidate_distances;
-    vector<unsigned char> restorable;
-    const vector<h_ptr> &raw_hnodes =
-        raw_context.raw_reachable_hnodes.empty()
-        ? raw_context.active_hnodes
-        : raw_context.raw_reachable_hnodes;
-    const vector<pair<double, list<h_ptr>>> &raw_paths =
-        raw_context.raw_root_paths.empty()
-        ? raw_context.root_paths
-        : raw_context.raw_root_paths;
-    for(size_t index = 0; index < raw_hnodes.size(); ++index){
-        const h_ptr &h = raw_hnodes[index];
-        if(h == nullptr || index >= raw_paths.size()) continue;
-        const double robot_to_anchor = raw_paths[index].first;
-        if(!std::isfinite(robot_to_anchor) ||
-           robot_to_anchor >= kUnreachableDistance) continue;
-        for(const hfe_ptr &edge : h->hf_edges_){
-            if(edge == nullptr || edge->tail_n_ == nullptr ||
-               !std::isfinite(edge->length_) ||
-               edge->length_ >= kBlockedEdgeDistance) continue;
-            const uint32_t fid = edge->tail_n_->fid_;
-            const uint8_t vid = edge->tail_n_->vid_;
-            if(EROI_ == nullptr || fid >= EROI_->EROI_.size()) continue;
-            const auto &frontier = EROI_->EROI_[fid];
-            if(frontier.f_state_ != 1U ||
-               vid >= frontier.local_vps_.size() ||
-               frontier.local_vps_[vid] != 1U) continue;
-            candidate_frontiers.push_back(fid);
-            candidate_distances.push_back(robot_to_anchor + edge->length_);
-            restorable.push_back(1U);
-        }
-    }
-    const size_t selected = ChooseNearestFailOpenCandidate(
-        candidate_distances, restorable);
-    if(selected >= candidate_frontiers.size()){
-        reason = "fail-open raw collection contained no valid H-F target";
-        return false;
-    }
-    const uint32_t best_frontier = candidate_frontiers[selected];
-
-    FrontierRuntimeState &runtime = frontier_runtime_[best_frontier];
-    runtime.state = FrontierState::SUSPECT;
-    runtime.owner_region = -1;
-    runtime.low_gain_streak = 0;
-    runtime.path_failure_streak = 0;
-    runtime.selected_unknown_before = -1;
-    runtime.quarantine_until = 0.0;
-    active_region_id_ = -1;
-    EnterRecovery(RecoveryReason::FRONTIER_FAIL_OPEN,
-                  ros::WallTime::now().toSec());
-    ReassignFrontierOwners();
-
-    const GlobalPlanStatus restored_status = CollectActiveBoundaryRegions(
-        ps, context, true);
-    if(restored_status != GlobalPlanStatus::SUCCESS){
-        reason = "fail-open restored a frontier but EOHDT recollection failed";
-        return false;
-    }
-    reason = "fail-open restored closest raw reachable frontier " +
-        std::to_string(best_frontier);
-    return true;
-}
-
-double MultiDtgPlus::ExpectedGainScale(uint32_t frontier_id) const{
-    if(EROI_ == nullptr || frontier_id >= EROI_->EROI_.size()) return 1.0;
-    return ExpectedGainRankingScale(
-        static_cast<double>(
-            EROI_->EROI_[frontier_id].unknown_num_),
-        spectral_exec_config_.frontier_expected_gain_eps,
-        spectral_exec_config_.low_expected_gain_scale);
-}
-
-bool MultiDtgPlus::IsLateStage(const GlobalRouteContext &context){
-    double total_gain = 0.0;
-    const size_t count = RawReachableFrontierCount(&context, &total_gain);
-    if(late_stage_active_){
-        if(count >= static_cast<size_t>(
-            spectral_exec_config_.late_stage_reactivate_frontier_count)){
-            late_stage_active_ = false;
-            no_cut_epochs_ = 0;
-        }
-        return late_stage_active_;
-    }
-    late_stage_active_ =
-        count <= static_cast<size_t>(spectral_exec_config_.late_stage_frontier_count) ||
-        total_gain <= spectral_exec_config_.late_stage_total_gain ||
-        no_cut_epochs_ >= spectral_exec_config_.late_stage_no_cut_epochs;
-    return late_stage_active_;
-}
+// ── Helpers ──
 
 bool MultiDtgPlus::HasEffectiveFrontier(
     const h_ptr &h, int region_id) const{
@@ -1755,246 +1256,41 @@ bool MultiDtgPlus::HasEffectiveFrontier(
         if(fid >= EROI_->EROI_.size()) continue;
         const auto &frontier = EROI_->EROI_[fid];
         if(frontier.f_state_ != 1U || vid >= frontier.local_vps_.size() ||
-           frontier.local_vps_[vid] != 1U) continue;
-        const auto runtime = frontier_runtime_.find(fid);
-        if(runtime == frontier_runtime_.end()) return region_id < 0;
-        if(runtime->second.state == FrontierState::QUARANTINED ||
-           runtime->second.state == FrontierState::DEAD_FRONTIER) continue;
+           frontier.local_vps_[vid] != 1U ||
+           static_cast<double>(frontier.unknown_num_) <=
+               spectral_v4_config_.frontier_expected_gain_eps) continue;
         if(region_id < 0) return true;
-        if(runtime->second.owner_region == region_id &&
-           (runtime->second.state == FrontierState::NEW ||
-            runtime->second.state == FrontierState::ACTIVE ||
-            runtime->second.state == FrontierState::SUSPECT)) return true;
+        // For region-specific check, verify the frontier "belongs" to this region
+        // (same active anchor set membership)
+        const auto h_region = h_region_ids_.find(h->id_);
+        if(h_region != h_region_ids_.end() && h_region->second == region_id) return true;
     }
+    // If no specific region filter, any frontier counts
+    if(region_id < 0 && !h->hf_edges_.empty()) return true;
     return false;
 }
 
-void MultiDtgPlus::UpdateFrontierRuntimeStates(){
-    if(EROI_ == nullptr) return;
-    const double now = ros::WallTime::now().toSec();
-    for(auto &entry : frontier_runtime_){
-        if(entry.first >= EROI_->EROI_.size() ||
-           EROI_->EROI_[entry.first].f_state_ != 1U){
-            entry.second.state = FrontierState::DEAD_FRONTIER;
-        }
-    }
-    for(size_t index = 0; index < EROI_->EROI_.size(); ++index){
-        const auto &frontier = EROI_->EROI_[index];
+size_t MultiDtgPlus::EffectiveFrontierCount(double *total_gain) const{
+    if(total_gain != nullptr) *total_gain = 0.0;
+    if(EROI_ == nullptr) return 0U;
+    size_t count = 0U;
+    for(size_t fid = 0; fid < EROI_->EROI_.size(); ++fid){
+        const auto &frontier = EROI_->EROI_[fid];
         if(frontier.f_state_ != 1U) continue;
-        const uint32_t fid = static_cast<uint32_t>(index);
-        FrontierRuntimeState &runtime = frontier_runtime_[fid];
-        const bool first_seen = runtime.last_seen_time <= 0.0;
-        runtime.last_seen_time = now;
-        runtime.last_seen_frontier_epoch = frontier_epoch_;
-        if(runtime.state == FrontierState::DEAD_FRONTIER){
-            runtime = FrontierRuntimeState();
-            runtime.last_seen_time = now;
-            runtime.last_seen_frontier_epoch = frontier_epoch_;
-        }
-        if(runtime.state == FrontierState::QUARANTINED){
-            if(now < runtime.quarantine_until) continue;
-            runtime.state = FrontierState::SUSPECT;
-            runtime.low_gain_streak = 0;
-        }
-
         bool alive = false;
-        for(const uint8_t state : frontier.local_vps_){
-            if(state == 1U){ alive = true; break; }
-        }
-        if(!alive){
-            runtime.state = FrontierState::SUSPECT;
-            continue;
-        }
-        if(first_seen || runtime.state == FrontierState::NEW){
-            runtime.state = first_seen ? FrontierState::NEW : FrontierState::ACTIVE;
-        }
-
-        if(executed_frontier_id_ == fid && runtime.selected_unknown_before >= 0){
-            const int actual_gain = std::max(0,
-                runtime.selected_unknown_before - frontier.unknown_num_);
-            runtime.last_actual_gain = actual_gain;
-            if(actual_gain >= spectral_exec_config_.frontier_actual_gain_eps){
-                runtime.low_gain_streak = 0;
-                runtime.repeat_count = 0;
-                runtime.state = FrontierState::ACTIVE;
-                runtime.selected_unknown_before = frontier.unknown_num_;
-                runtime.last_selected_time = now;
-                runtime.last_repeat_count_time = now;
-                last_frontier_progress_time_ = now;
-                last_region_progress_time_ = now;
-            }
-            else if(runtime.last_gain_check_frontier_epoch != frontier_epoch_ &&
-                    now - runtime.last_selected_time >=
-                    spectral_exec_config_.region_stall_window){
-                runtime.last_gain_check_frontier_epoch = frontier_epoch_;
-                ++runtime.low_gain_streak;
-                runtime.state = FrontierState::SUSPECT;
-                if(runtime.low_gain_streak >=
-                   spectral_exec_config_.frontier_low_gain_cycles){
-                    // Actual-gain evidence alone is insufficient to prove a
-                    // frontier invalid: arrival and StrongCheck/path-failure
-                    // evidence are not available here.  Stop this observation
-                    // window and retain SUSPECT as an actionable fail-open
-                    // target instead of quarantining it.
-                    runtime.selected_unknown_before = -1;
-                    executed_frontier_id_ =
-                        std::numeric_limits<uint32_t>::max();
-                }
+        for(size_t vid = 0; vid < frontier.local_vps_.size(); ++vid){
+            if(frontier.local_vps_[vid] == 1U){
+                alive = true;
+                break;
             }
         }
-        runtime.last_unknown_num = frontier.unknown_num_;
+        if(!alive) continue;
+        if(static_cast<double>(frontier.unknown_num_) <=
+           spectral_v4_config_.frontier_expected_gain_eps) continue;
+        ++count;
+        if(total_gain != nullptr) *total_gain += std::max(0, frontier.unknown_num_);
     }
-}
-
-void MultiDtgPlus::ReassignFrontierOwners(){
-    if(EROI_ == nullptr) return;
-    std::unordered_map<uint32_t, pair<double, int>> best_owner;
-    for(const h_ptr &h : H_list_){
-        if(h == nullptr) continue;
-        const int region = RegionForHnode(h);
-        for(const hfe_ptr &edge : h->hf_edges_){
-            if(edge == nullptr || edge->tail_n_ == nullptr ||
-               !std::isfinite(edge->length_) || edge->length_ >= kBlockedEdgeDistance) continue;
-            const uint32_t fid = edge->tail_n_->fid_;
-            const uint8_t vid = edge->tail_n_->vid_;
-            if(fid >= EROI_->EROI_.size() || EROI_->EROI_[fid].f_state_ != 1U ||
-               vid >= EROI_->EROI_[fid].local_vps_.size() ||
-               EROI_->EROI_[fid].local_vps_[vid] != 1U) continue;
-            const auto existing = best_owner.find(fid);
-            const bool candidate_is_labeled = region >= 0;
-            const bool existing_is_labeled = existing != best_owner.end() &&
-                existing->second.second >= 0;
-            if(existing == best_owner.end() ||
-               (candidate_is_labeled && !existing_is_labeled) ||
-               (candidate_is_labeled == existing_is_labeled &&
-                edge->length_ < existing->second.first)){
-                best_owner[fid] = {edge->length_, region};
-            }
-        }
-    }
-    for(auto &entry : frontier_runtime_){
-        FrontierRuntimeState &runtime = entry.second;
-        if(runtime.state == FrontierState::DEAD_FRONTIER ||
-           runtime.state == FrontierState::QUARANTINED) continue;
-        const auto best = best_owner.find(entry.first);
-        const int owner = best == best_owner.end() ? -1 : best->second.second;
-        if(owner != runtime.owner_region){
-            runtime.owner_region = owner;
-            ++frontier_reassignment_count_;
-        }
-        if(owner >= 0 && active_region_id_ >= 0 && owner != active_region_id_){
-            runtime.state = FrontierState::DEFERRED;
-        }
-        else if(runtime.state == FrontierState::DEFERRED){
-            runtime.state = FrontierState::ACTIVE;
-        }
-    }
-}
-
-void MultiDtgPlus::RecordSelectedFrontier(uint32_t frontier_id){
-    if(EROI_ == nullptr || frontier_id >= EROI_->EROI_.size()) return;
-    const double now = ros::WallTime::now().toSec();
-    FrontierRuntimeState &runtime = frontier_runtime_[frontier_id];
-    const RepeatPlanningObservation observation =
-        ObserveRepeatedPlanning(
-            selected_frontier_id_ == frontier_id,
-            runtime.repeat_count, runtime.last_repeat_count_time,
-            repeated_target_count_, now);
-    runtime.repeat_count = observation.repeat_count;
-    runtime.last_repeat_count_time = observation.last_count_time;
-    repeated_target_count_ = observation.total_repeat_count;
-    selected_frontier_id_ = frontier_id;
-}
-
-void MultiDtgPlus::RecordExecutedFrontier(uint32_t frontier_id){
-    if(EROI_ == nullptr || frontier_id >= EROI_->EROI_.size() ||
-       EROI_->EROI_[frontier_id].f_state_ != 1U) return;
-    const double now = ros::WallTime::now().toSec();
-    FrontierRuntimeState &runtime = frontier_runtime_[frontier_id];
-    // Replanning the same in-flight target must not restart its information-
-    // gain observation window every cycle.
-    if(executed_frontier_id_ == frontier_id &&
-       runtime.selected_unknown_before >= 0){
-        return;
-    }
-    runtime.selected_unknown_before = EROI_->EROI_[frontier_id].unknown_num_;
-    runtime.last_selected_time = now;
-    runtime.last_gain_check_frontier_epoch = frontier_epoch_;
-    if(runtime.state == FrontierState::NEW ||
-       runtime.state == FrontierState::SUSPECT){
-        runtime.state = FrontierState::ACTIVE;
-    }
-    executed_frontier_id_ = frontier_id;
-}
-
-bool MultiDtgPlus::DetectAndHandleRegionStall(double now){
-    if(active_region_id_ < 0) return false;
-    size_t blocking = 0U;
-    double unknown = 0.0;
-    for(const auto &entry : frontier_runtime_){
-        if(entry.second.owner_region != active_region_id_ ||
-           (entry.second.state != FrontierState::NEW &&
-            entry.second.state != FrontierState::ACTIVE &&
-            entry.second.state != FrontierState::SUSPECT)) continue;
-        ++blocking;
-        if(EROI_ != nullptr && entry.first < EROI_->EROI_.size()){
-            unknown += std::max(0, EROI_->EROI_[entry.first].unknown_num_);
-        }
-    }
-    if(watchdog_region_id_ != active_region_id_){
-        watchdog_region_id_ = active_region_id_;
-        watchdog_blocking_frontiers_ = blocking;
-        watchdog_unknown_gain_ = unknown;
-        last_region_progress_time_ = now;
-        return false;
-    }
-    if(blocking < watchdog_blocking_frontiers_ ||
-       unknown + spectral_exec_config_.frontier_actual_gain_eps <
-       watchdog_unknown_gain_){
-        last_region_progress_time_ = now;
-    }
-    watchdog_blocking_frontiers_ = blocking;
-    watchdog_unknown_gain_ = unknown;
-    if(blocking == 0U){
-        last_region_progress_time_ = now;
-        return false;
-    }
-    if(now - last_region_progress_time_ >
-       spectral_exec_config_.region_stall_timeout){
-        EnterRecovery(RecoveryReason::REGION_STALL, now);
-        last_region_progress_time_ = now;
-        return true;
-    }
-    return false;
-}
-
-void MultiDtgPlus::RecordActiveRegionPathResult(bool success){
-    if(active_region_id_ < 0) return;
-    auto active = regions_.find(active_region_id_);
-    if(active == regions_.end()){
-        active_region_id_ = -1;
-        return;
-    }
-    if(success){
-        active->second.unreachable_streak = 0;
-        return;
-    }
-    if(active->second.last_unreachable_frontier_epoch == frontier_epoch_) return;
-    active->second.last_unreachable_frontier_epoch = frontier_epoch_;
-    ++active->second.unreachable_streak;
-    if(active->second.unreachable_streak <
-       spectral_exec_config_.unreachable_confirm_cycles) return;
-
-    const int unreachable_region = active_region_id_;
-    active->second.exec_state = RegionExecState::UNREACHABLE;
-    active->second.unreachable_spectral_epoch = spectral_epoch_;
-    active_region_id_ = -1;
-    missed_region_set_.erase(unreachable_region);
-    std::deque<int> remaining;
-    for(const int id : missed_regions_){
-        if(id != unreachable_region) remaining.push_back(id);
-    }
-    missed_regions_.swap(remaining);
+    return count;
 }
 
 h_ptr MultiDtgPlus::ResolveSpectralCandidateH(const hfe_ptr &edge,
@@ -2007,81 +1303,4 @@ h_ptr MultiDtgPlus::ResolveSpectralCandidateH(const hfe_ptr &edge,
     h_ptr candidate;
     if(!FindHnode(viewpoint_pos, local_node->root_id_, candidate)) return nullptr;
     return candidate;
-}
-
-double MultiDtgPlus::SpectralGainMultiplier(const h_ptr &candidate_h,
-    double travel_distance) const{
-    const double epsilon = spectral_config_.numeric_epsilon;
-    if(!std::isfinite(travel_distance) || travel_distance < 0.0 ||
-       !std::isfinite(lambda_e_) || lambda_e_ < 0.0 ||
-       !std::isfinite(v_max_) || !std::isfinite(epsilon) ||
-       v_max_ <= std::max(epsilon, 1.0e-9) ||
-       !soft_route_selected_ || !spectral_exec_config_.enabled ||
-       candidate_h == nullptr ||
-       spectral_mode_state_.mode != SpectralMode::ACTIVE_SOFT ||
-       !stable_spectral_result_.has_valid_cut() ||
-       !std::isfinite(stable_spectral_result_.diagnostics.cut_threshold)){
-        return 1.0;
-    }
-    const auto candidate_fiedler =
-        stable_spectral_result_.fiedler_by_h_id.find(candidate_h->id_);
-    if(candidate_fiedler == stable_spectral_result_.fiedler_by_h_id.end()){
-        return 1.0;
-    }
-    if(!std::isfinite(candidate_fiedler->second) ||
-       !stable_spectral_result_.fiedler.allFinite()){
-        return 1.0;
-    }
-
-    double maximum_cut_distance = 0.0;
-    for(Eigen::Index i = 0; i < stable_spectral_result_.fiedler.size(); ++i){
-        maximum_cut_distance = std::max(maximum_cut_distance,
-            std::abs(stable_spectral_result_.fiedler(i) -
-                     stable_spectral_result_.diagnostics.cut_threshold));
-    }
-    const double normalized_distance = std::abs(candidate_fiedler->second -
-        stable_spectral_result_.diagnostics.cut_threshold) /
-        std::max(maximum_cut_distance, std::max(epsilon, 1.0e-9));
-    if(!std::isfinite(normalized_distance)) return 1.0;
-    const double boundary_penalty = std::max(0.0,
-        std::min(1.0, 1.0 - normalized_distance));
-    const int candidate_region = RegionForHnode(candidate_h);
-    const double cross_penalty = partition_valid_ && active_region_id_ >= 0 &&
-        candidate_region >= 0 && candidate_region != active_region_id_ ? 1.0 : 0.0;
-
-    size_t current_frontiers = 0U;
-    size_t all_frontiers = 0U;
-    for(const auto &entry : frontier_runtime_){
-        if(entry.second.state == FrontierState::QUARANTINED ||
-           entry.second.state == FrontierState::DEAD_FRONTIER) continue;
-        ++all_frontiers;
-        if(entry.second.owner_region == active_region_id_) ++current_frontiers;
-    }
-    const double return_probability = all_frontiers == 0U ? 0.0 :
-        static_cast<double>(current_frontiers) / static_cast<double>(all_frontiers);
-    double switch_cost = ComputeDynamicSwitchPenalty(
-        spectral_exec_config_.switch_penalty_base,
-        partition_confidence_result_.confidence, return_probability) *
-        cross_penalty * std::max(0.0,
-            spectral_exec_config_.first_target_switch_penalty_scale);
-    // Keep the local spectral term fail-soft and small.  A nearby frontier is
-    // never suppressed solely because it lies across the current partition.
-    if(cross_penalty > 0.0 && travel_distance <=
-       spectral_exec_config_.neighbor_override_distance){
-        switch_cost = 0.0;
-    }
-    const double extra_distance = switch_cost +
-        spectral_exec_config_.spectral_view_weight * boundary_penalty *
-        std::max(0.0, travel_distance);
-    if(!std::isfinite(switch_cost) || !std::isfinite(extra_distance) ||
-       extra_distance < 0.0) return 1.0;
-    const double extra_time = extra_distance /
-        std::max(v_max_, std::max(epsilon, 1.0e-9));
-    if(!std::isfinite(extra_time) || extra_time < 0.0) return 1.0;
-    const double exponent = std::max(-700.0,
-        std::min(0.0, -lambda_e_ * extra_time));
-    if(!std::isfinite(exponent)) return 1.0;
-    const double multiplier = std::exp(exponent);
-    if(!std::isfinite(multiplier)) return 1.0;
-    return std::max(0.0, std::min(1.0, multiplier));
 }

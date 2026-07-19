@@ -78,8 +78,8 @@ struct SpectralConfig {
 
   std::size_t min_spectral_nodes = 3;
   // Zero disables the upper bound.  Spectral-EDEN v2 compresses the support
-  // graph before this kernel and skips a solve if it still exceeds 60 nodes.
-  std::size_t max_spectral_nodes = 60;
+  // graph before this kernel and skips a solve if it still exceeds 80 nodes.
+  std::size_t max_spectral_nodes = 80;
 
   // Small support graphs use Eigen's dense self-adjoint eigensolver.  Larger
   // graphs use a sparse shifted block inverse iteration for lambda2/lambda3;
@@ -141,59 +141,6 @@ struct SpectralGraphSnapshot {
   std::vector<SpectralEdgeInput> edges;
 };
 
-// Immutable, pointer-free copy of the live DTG used by the asynchronous
-// spectral worker.  The planning thread is responsible only for filling these
-// value types.  In particular, the worker must never retain H-node pointers,
-// edge pointers, map pointers, or references to a GlobalRouteContext.
-struct RawSpectralNodeInput {
-  std::uint32_t h_id = 0;
-  bool active_anchor = false;
-  // Prevents a semantically important node (frontier attachment, seed, or
-  // other execution anchor) from being removed by degree-two compression.
-  bool preserve = false;
-  // Includes a node in the initial support set even when it is not on a
-  // selected active-anchor shortest path.  Robot-to-DTG root-path members use
-  // this flag so the worker can retain the live approach branch.
-  bool support_required = false;
-
-  RawSpectralNodeInput() = default;
-  explicit RawSpectralNodeInput(std::uint32_t id, bool active = false,
-                                bool preserved = false,
-                                bool required = false)
-      : h_id(id),
-        active_anchor(active),
-        preserve(preserved),
-        support_required(required) {}
-};
-
-struct RawSpectralEdgeInput {
-  std::uint32_t from_h_id = 0;
-  std::uint32_t to_h_id = 0;
-  double length = std::numeric_limits<double>::quiet_NaN();
-  // The main thread may copy an already-computed immutable scalar.  It must
-  // not query the mutable occupancy map merely to fill this field.  Distance-
-  // only builds accept NaN; clearance-weighted builds fail open when a
-  // selected support edge has no finite cached value.
-  double cached_clearance = std::numeric_limits<double>::quiet_NaN();
-
-  RawSpectralEdgeInput() = default;
-  RawSpectralEdgeInput(std::uint32_t from, std::uint32_t to,
-                       double edge_length,
-                       double edge_clearance =
-                           std::numeric_limits<double>::quiet_NaN())
-      : from_h_id(from),
-        to_h_id(to),
-        length(edge_length),
-        cached_clearance(edge_clearance) {}
-};
-
-struct RawSpectralSnapshot {
-  std::uint64_t graph_version = 0;
-  std::uint64_t frontier_version = 0;
-  std::vector<RawSpectralNodeInput> nodes;
-  std::vector<RawSpectralEdgeInput> edges;
-};
-
 using FiedlerHistory = std::unordered_map<std::uint32_t, double>;
 
 struct SpectralDiagnostics {
@@ -242,7 +189,6 @@ struct SpectralDiagnostics {
   double ncut = std::numeric_limits<double>::quiet_NaN();
 
   double solve_time_ms = 0.0;
-  double ncut_time_ms = 0.0;
   double total_time_ms = 0.0;
   std::string reason;
 };

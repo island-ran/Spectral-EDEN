@@ -949,11 +949,6 @@ SpectralResult SpectralRouter::Solve(
     }
   }
 
-  const Clock::time_point ncut_start = Clock::now();
-  const auto record_ncut_time = [&result, &ncut_start]() {
-    result.diagnostics.ncut_time_ms =
-        ElapsedMilliseconds(ncut_start);
-  };
   result.labels.assign(node_count, -1);
   const double total_volume = result.degree.sum();
   if (!std::isfinite(total_volume) ||
@@ -961,7 +956,6 @@ SpectralResult SpectralRouter::Solve(
     SetFailure(&result, SpectralSolveStatus::NUMERICAL_FAILURE,
                "total graph volume is non-finite or numerically zero",
                total_start);
-    record_ncut_time();
     return result;
   }
   const double required_volume =
@@ -1024,7 +1018,6 @@ SpectralResult SpectralRouter::Solve(
       SetFailure(&result, SpectralSolveStatus::NUMERICAL_FAILURE,
                  "incremental sweep produced an invalid cut weight",
                  total_start);
-      record_ncut_time();
       return result;
     }
     const double ncut = stable_cut_weight / left_volume +
@@ -1051,7 +1044,6 @@ SpectralResult SpectralRouter::Solve(
     result.diagnostics.reason =
         "the embedding is valid, but no sweep threshold satisfies the "
         "configured size, volume, and distinct-value constraints";
-    record_ncut_time();
     result.diagnostics.total_time_ms = ElapsedMilliseconds(total_start);
     return result;
   }
@@ -1092,7 +1084,6 @@ SpectralResult SpectralRouter::Solve(
 
   result.status = SpectralSolveStatus::SUCCESS;
   result.diagnostics.reason = "spectral embedding and sweep cut succeeded";
-  record_ncut_time();
   result.diagnostics.total_time_ms = ElapsedMilliseconds(total_start);
   return result;
 }

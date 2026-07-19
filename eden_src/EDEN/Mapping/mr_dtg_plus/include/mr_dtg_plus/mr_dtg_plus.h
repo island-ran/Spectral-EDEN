@@ -4,9 +4,6 @@
 #include <ros/ros.h>
 #include <thread>
 #include <future>
-#include <algorithm>
-#include <cmath>
-#include <limits>
 #include <Eigen/Eigen>
 #include <vector>
 #include <list>
@@ -30,7 +27,6 @@
 
 #include <mr_dtg_plus/mr_dtg_plus_structures.h>
 #include <mr_dtg_plus/spectral_router.h>
-#include <mr_dtg_plus/spectral_snapshot_builder.h>
 #include <mr_dtg_plus/spectral_v2_policy.h>
 #include <block_map_lite/color_manager.h>
 #include <block_map_lite/block_map_lite.h>
@@ -178,14 +174,6 @@ public:
     inline uint64_t frontier_epoch() const { return frontier_epoch_; }
     inline SpectralMode spectral_mode() const { return spectral_mode_state_.mode; }
     bool HasPendingRegions() const;
-    /**
-     * @brief Record that a target trajectory really passed optimization and
-     * validation and is about to be published/executed.
-     *
-     * Target selection alone must not be treated as exploration progress.
-     * EDEN should call this only after a valid trajectory has been produced.
-     */
-    void RecordExecutedFrontier(uint32_t frontier_id);
     // Pure snapshot transform exposed for deterministic validation and
     // offline analysis; it never reads live ROS/DTG state.
     bool CompressDegreeTwoChains(const SpectralGraphSnapshot &input,
@@ -277,22 +265,19 @@ private:
         vector<vector<Eigen::Vector3d>> seed_paths;
         vector<h_ptr> active_hnodes;
         vector<pair<double, list<h_ptr>>> root_paths;
-        vector<h_ptr> raw_reachable_hnodes;
-        vector<pair<double, list<h_ptr>>> raw_root_paths;
         Eigen::MatrixXd distance_matrix;
         std::unordered_map<uint32_t, size_t> active_index;
         bool pairwise_connected = true;
-        double collect_active_ms = 0.0;
-        double distance_matrix_ms = 0.0;
     };
 
     struct SpectralAsyncOutput{
-        SpectralWorkerOutput worker;
-        PartitionConfidenceResult confidence;
+        SpectralGraphSnapshot snapshot;
+        SpectralResult result;
         uint64_t dtg_version = 0;
         uint64_t frontier_version = 0;
+        size_t raw_node_count = 0;
         double submitted_time = 0.0;
-        double confidence_ms = 0.0;
+        double snapshot_build_ms = 0.0;
     };
 
     GlobalPlanStatus CollectActiveBoundaryRegions(const Eigen::Vector3d &ps,
@@ -311,9 +296,6 @@ private:
     void MarkTopologyChanged();
     void MarkFrontierChanged();
     void PublishGlobalPlanDiagnostics();
-    bool CopyRawSpectralSnapshot(const GlobalRouteContext &context,
-        RawSpectralSnapshot &snapshot, double &copy_ms,
-        std::string &reason) const;
 
     bool BuildSpectralGraphSnapshot(const GlobalRouteContext &context,
         SpectralGraphSnapshot &snapshot, std::string &reason);
@@ -340,10 +322,8 @@ private:
     void MatchAndUpdatePersistentRegions(const SpectralResult &result,
         const GlobalRouteContext &context);
     void UpdateRegionExecutionState(const GlobalRouteContext &context);
-    bool BuildSpectralFirstTargetRoute(const GlobalRouteContext &context,
-        const vector<h_ptr> &baseline_route, vector<h_ptr> &route_h,
-        double switch_penalty, size_t &selected_baseline_index,
-        double &baseline_first_distance, double &candidate_first_distance,
+    bool BuildRegionAwareRoute(const GlobalRouteContext &context,
+        vector<h_ptr> &route_h, double switch_penalty,
         std::string &reason) const;
     RouteMetrics ComputeRouteMetrics(const GlobalRouteContext &context,
         const vector<h_ptr> &route) const;
@@ -362,16 +342,9 @@ private:
     void UpdateFrontierRuntimeStates();
     void ReassignFrontierOwners();
     bool DetectAndHandleRegionStall(double now);
-    bool HasRawReachableFrontier(const h_ptr &h) const;
     bool HasEffectiveFrontier(const h_ptr &h, int region_id = -1) const;
-    size_t RawReachableFrontierCount(const GlobalRouteContext *context,
-        double *total_gain = nullptr) const;
-    size_t ActionableFrontierCount(const GlobalRouteContext *context,
-        double *total_gain = nullptr) const;
-    bool RestoreClosestRawFrontier(const Eigen::Vector3d &ps,
-        GlobalRouteContext &context, std::string &reason);
-    double ExpectedGainScale(uint32_t frontier_id) const;
     void RecordSelectedFrontier(uint32_t frontier_id);
+    size_t EffectiveFrontierCount(double *total_gain = nullptr) const;
 
     inline bool InsideMap(const Eigen::Vector3i &idx3);
     inline bool InsideMap(const Eigen::Vector3d &pos);
@@ -485,10 +458,7 @@ private:
     void DebugTree(Eigen::Vector3d ps, vector<h_ptr> &hs, vector<vector<int>> &branches);
     void DebugLineStrip(Eigen::Vector3d ps, vector<h_ptr> &route_h);
     void MainTainDistMap(h_ptr &hs, vector<h_ptr> &tars);
-    void ParallelDijkstra(vector<h_ptr> &p_hs, vector<double> &g0_hs,
-        vector<h_ptr> &tars, vector<pair<double, list<h_ptr>>> &paths,
-        vector<h_ptr> *raw_tars = nullptr,
-        vector<pair<double, list<h_ptr>>> *raw_paths = nullptr);
+    void ParallelDijkstra(vector<h_ptr> &p_hs, vector<double> &g0_hs, vector<h_ptr> &tars, vector<pair<double, list<h_ptr>>> &paths);
     void Prim(Eigen::MatrixXd &dist_mat, vector<int> &parent, vector<vector<int>> &branches);
 
     /* call after LRM_->GetDists */
@@ -567,6 +537,7 @@ private:
     int next_region_id_;
     SpectralConfig spectral_config_;
     SpectralExecutionConfig spectral_exec_config_;
+    SpectralV4Config     spectral_v4_config_;
     SpectralRouter spectral_router_;
     SpectralResult last_spectral_result_;
     SpectralResult stable_spectral_result_;
@@ -585,7 +556,6 @@ private:
     size_t last_submitted_anchor_count_;
     size_t last_raw_spectral_node_count_;
     size_t last_compressed_spectral_node_count_;
-    SpectralStageTimings last_spectral_stage_timings_;
     FiedlerHistory previous_fiedler_;
     std::unordered_map<uint32_t, int> previous_region_ids_;
     double lambda2_ema_;
@@ -614,12 +584,7 @@ private:
     bool recovery_requested_;
     bool late_stage_active_;
     int no_cut_epochs_;
-    int consecutive_main_snapshot_overruns_;
-    int consecutive_worker_budget_overruns_;
-    double spectral_cooldown_until_;
-    uint64_t main_snapshot_overrun_count_;
-    uint64_t worker_budget_overrun_count_;
-    uint64_t spectral_cooldown_count_;
+    int consecutive_spectral_timeouts_;
     uint64_t spectral_mode_toggle_count_;
     uint64_t recovery_count_;
     uint64_t evaluated_spectral_routes_;
@@ -629,8 +594,6 @@ private:
 
     std::unordered_map<uint32_t, FrontierRuntimeState> frontier_runtime_;
     uint32_t selected_frontier_id_;
-    uint32_t executed_frontier_id_ = std::numeric_limits<uint32_t>::max();
-    bool collect_raw_frontiers_ = false;
     double last_frontier_progress_time_;
     double last_region_progress_time_;
     int watchdog_region_id_;
@@ -1032,7 +995,6 @@ inline bool MultiDtgPlus::CreateConnectFnode(const Eigen::Vector3d &vp_pos, cons
                 cout<<"fi:"<<(*fi)->fid_<<"  "<<int((*fi)->vid_)<<endl;
             }
             StopageDebug("CreateConnectFnode not find fi");
-            return false;
         }
         else{
             // ROS_WARN("CreateConnectFnode5");
@@ -1546,114 +1508,93 @@ inline bool MultiDtgPlus::CheckNode(const Eigen::Vector3d &pos, const h_ptr &h, 
 
 
 inline double MultiDtgPlus::GetGainExp1(const Eigen::Vector4d &ps, const Eigen::Vector4d &vp, const Eigen::Vector3d &vs, const double &dist){
-    constexpr double kMotionEpsilon = 1.0e-6;
-    if(EROI_ == nullptr || !ps.allFinite() || !vp.allFinite() ||
-       !vs.allFinite() || !std::isfinite(dist) || dist < 0.0 ||
-       !std::isfinite(v_max_) || v_max_ <= kMotionEpsilon ||
-       !std::isfinite(yv_max_) || yv_max_ <= kMotionEpsilon ||
-       !std::isfinite(lambda_e_) || lambda_e_ < 0.0 ||
-       !std::isfinite(a_max_) || !std::isfinite(lambda_a_) ||
-       !std::isfinite(acc_gain_) || !std::isfinite(yaw_gain_)){
-        return 0.0;
-    }
-
-    const Eigen::Vector3d displacement = vp.head<3>() - ps.head<3>();
-    const double spatial_distance = displacement.norm();
-    const double speed = vs.norm();
-    if(!std::isfinite(spatial_distance) || !std::isfinite(speed)) return 0.0;
-
+    Eigen::Vector3d dp = (vp.head(3) - ps.head(3)).normalized();
+    Eigen::Vector3d dv = dp * v_max_ - vs.head(3);
     double a_cost = 0.0;
-    double v1_max = v_max_;
-    if(speed >= 0.01 && spatial_distance > kMotionEpsilon){
-        const Eigen::Vector3d direction = displacement / spatial_distance;
-        const Eigen::Vector3d velocity_direction = vs / speed;
-        const double cosine = std::max(-1.0, std::min(1.0,
-            direction.dot(velocity_direction)));
-        const double half_turn_angle = std::acos(cosine);
-        const double turn_angle = 2.0 * half_turn_angle;
-        const double sine = std::sin(half_turn_angle);
-        const double curvature_acceleration = a_max_ * lambda_a_;
+    double det_theta;
+    // double omiga;
+    double v1_max;
 
-        if(turn_angle <= 1.0e-4){
-            // Straight-motion limit: no artificial curvature penalty.
-            a_cost = 0.0;
+    if(vs.norm() < 0.01){
+        a_cost = 0;
+        v1_max = v_max_;
+    }
+    else{
+        det_theta = acos(dp.dot(vs.normalized()))*2;
+        double r = (vp.head(3) - ps.head(3)).norm() / sin(det_theta*0.5);
+        double omiga = sqrt(a_max_ * lambda_a_ / r);
+        v1_max = min(r * omiga, v_max_); 
+        // omiga = a_max_ / vs.norm();
+        a_cost = det_theta / omiga * acc_gain_;
+        if(vs.head(3).norm() > v1_max){
+            // a_cost += (vs.head(3).norm() - v1_max) / a_max_ * acc_gain_*0;
+            // a_cost += (v_max_ - v1_max) / a_max_ * acc_gain_;
         }
-        else if(std::abs(sine) > kMotionEpsilon &&
-                curvature_acceleration > kMotionEpsilon){
-            const double radius = spatial_distance / std::abs(sine);
-            const double omega = std::sqrt(curvature_acceleration / radius);
-            const double curved_speed = radius * omega;
-            if(std::isfinite(radius) && radius > kMotionEpsilon &&
-               std::isfinite(omega) && omega > kMotionEpsilon &&
-               std::isfinite(curved_speed) && curved_speed > kMotionEpsilon){
-                v1_max = std::min(curved_speed, v_max_);
-                a_cost = turn_angle / omega * std::max(0.0, acc_gain_);
-            }
+        else{
+            // a_cost += (v_max_ - vs.head(3).norm()) / a_max_ * acc_gain_;
         }
-        else if(a_max_ > kMotionEpsilon){
-            // Degenerate curvature (notably an almost exact reversal): use a
-            // conservative braking/reorientation allowance instead of
-            // dividing by a vanishing sine or angular velocity.
-            a_cost = speed / a_max_ * std::max(0.0, acc_gain_);
-        }
+        // if(isnan(a_cost)){
+        //     cout<<"det_theta:"<<det_theta<<endl;
+        //     cout<<"r:"<<r<<endl;
+        //     cout<<"omiga:"<<omiga<<endl;
+        //     cout<<"v1_max:"<<v1_max<<endl;
+        //     cout<<"acc_gain_:"<<acc_gain_<<endl;
+        //     cout<<"a_cost:"<<a_cost<<endl;
+        //     cout<<"vs:"<<vs.transpose()<<endl;
+        //     cout<<"dp:"<<dp.transpose()<<endl;
+        //     StopageDebug("????");
+        // }
+
     }
 
-    if(!std::isfinite(v1_max) || v1_max <= kMotionEpsilon ||
-       !std::isfinite(a_cost) || a_cost < 0.0) return 0.0;
-    const double yaw_difference = std::abs(EROI_->YawDiff(vp(3), ps(3)));
-    if(!std::isfinite(yaw_difference)) return 0.0;
-    const double travel_time = dist / v1_max;
-    const double yaw_time = yaw_difference / yv_max_ * std::max(0.0, yaw_gain_);
-    const double time = std::max(travel_time, yaw_time) + a_cost;
-    if(!std::isfinite(time) || time < 0.0) return 0.0;
-    const double exponent = std::max(-700.0,
-        std::min(0.0, -lambda_e_ * time));
-    if(!std::isfinite(exponent)) return 0.0;
-    const double gain = std::exp(exponent);
-    return std::isfinite(gain) ? gain : 0.0;
+    double t = max(dist / v1_max/*dv.norm() / a_max_ * acc_gain_*/, abs(EROI_->YawDiff(vp(3), ps(3))) / yv_max_ * yaw_gain_) + a_cost;
+
+    // double t;// = max(dist / v_max_ + a_cost /*dv.norm() / a_max_ * acc_gain_*/, abs(EROI_->YawDiff(vp(3), ps(3))) / yv_max_ * yaw_gain_);
+    // t = max(dist / v1_max + dv.norm() / a_max_ * acc_gain_, abs(EROI_->YawDiff(vp(3), ps(3))) / yv_max_ * yaw_gain_);
+    return exp(-lambda_e_ * t);
 }
 
 inline double MultiDtgPlus::GetGainExp2(const Eigen::Vector4d &ps, const Eigen::Vector4d &vp1, 
     const Eigen::Vector3d &vs, const double &dist,
     const Eigen::Vector3d &vp2, const double &arc, const double &vm, const double &y2){
-    constexpr double kMotionEpsilon = 1.0e-6;
-    if(!vp2.allFinite() || !std::isfinite(arc) || arc < 0.0 ||
-       !std::isfinite(y2) || !std::isfinite(vm)){
-        return 0.0;
-    }
-    const double first_gain = GetGainExp1(ps, vp1, vs, dist);
-    if(!std::isfinite(first_gain) || first_gain <= 0.0) return 0.0;
+    Eigen::Vector3d dp = (vp1.head(3) - ps.head(3)).normalized();
+    Eigen::Vector3d dv = dp * v_max_ - vs.head(3);
 
-    const double segment_speed = vm > kMotionEpsilon
-        ? std::min(vm, v_max_) : v_max_;
-    if(!std::isfinite(segment_speed) || segment_speed <= kMotionEpsilon ||
-       EROI_ == nullptr || !std::isfinite(yv_max_) ||
-       yv_max_ <= kMotionEpsilon || !std::isfinite(lambda_e_) ||
-       lambda_e_ < 0.0 || !std::isfinite(yaw_gain_)){
-        return 0.0;
-    }
-    const double yaw_difference = std::abs(EROI_->YawDiff(y2, vp1(3)));
-    if(!std::isfinite(yaw_difference)) return 0.0;
-    const double second_time = std::max(
-        arc / segment_speed,
-        yaw_difference / yv_max_ * std::max(0.0, yaw_gain_));
-    if(!std::isfinite(second_time) || second_time < 0.0) return 0.0;
+    double a_cost = 0.0;
+    double det_theta, det_theta2;
+    double v1_max;
 
-    double first_time = 0.0;
-    if(lambda_e_ > kMotionEpsilon){
-        first_time = -std::log(first_gain) / lambda_e_;
-        if(!std::isfinite(first_time) || first_time < 0.0) return 0.0;
+    if(vs.norm() < 0.01){
+        a_cost = 0;
+        v1_max = v_max_;
     }
-    const double exponent = std::max(-700.0,
-        std::min(0.0, -lambda_e_ * (first_time + second_time)));
-    if(!std::isfinite(exponent)) return 0.0;
-    const double second_gain = std::exp(exponent);
-    const double gain = first_gain + second_gain;
-    return std::isfinite(gain) ? gain : 0.0;
+    else{
+        det_theta = acos(dp.dot(vs.normalized()))*2;
+        double r = (vp1.head(3) - ps.head(3)).norm() / sin(det_theta*0.5);
+        double omiga = sqrt(a_max_ * lambda_a_ / r);
+        v1_max = min(r * omiga, v_max_); 
+        a_cost = det_theta / omiga * acc_gain_;
+        if(vs.head(3).norm() > v1_max){
+            // a_cost += (vs.head(3).norm() - v1_max) / a_max_ * acc_gain_*0;
+            // a_cost += (v_max_ - v1_max) / a_max_ * acc_gain_;
+        }
+        else{
+            // a_cost += (v_max_ - vs.head(3).norm()) / a_max_ * acc_gain_;
+        }
+    }
+
+    double t = max(dist / v1_max/*dv.norm() / a_max_ * acc_gain_*/, abs(EROI_->YawDiff(vp1(3), ps(3))) / yv_max_ * yaw_gain_) + a_cost;
+    double gain = exp(-lambda_e_ * t);
+    dv = (vp2 - vp1.head(3)).normalized()*v_max_ - (vp1.head(3) - ps.head(3)).normalized()*v1_max;
+    t += max(arc / v1_max , abs(EROI_->YawDiff(y2, vp1(3))) / yv_max_ * yaw_gain_);// + dv.norm() / (a_max_ * lambda_a_) * acc_gain_;
+    gain += exp(-lambda_e_ * t);
+    return gain;
 }
 
 inline void MultiDtgPlus::StopageDebug(string c){
-    ROS_ERROR_STREAM("[MR_DTG] " << c);
+    std::cout << "\033[0;32m "<<c<<" \033[0m" << std::endl;    
+    ros::shutdown();
+    getchar();
 }
 
 }

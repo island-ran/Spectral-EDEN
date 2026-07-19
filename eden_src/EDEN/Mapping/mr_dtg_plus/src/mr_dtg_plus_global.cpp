@@ -34,9 +34,7 @@ void MultiDtgPlus::MarkFrontierChanged(){
 
 bool MultiDtgPlus::HasPendingRegions() const{
     for(const auto &h : H_list_){
-        // Completion must remain conservative: quarantined/SUSPECT lifecycle
-        // state cannot erase a physically valid frontier from the map.
-        if(HasRawReachableFrontier(h)) return true;
+        if(HasEffectiveFrontier(h, -1)) return true;
     }
     return false;
 }
@@ -54,18 +52,12 @@ void MultiDtgPlus::PublishGlobalPlanDiagnostics(){
         "q_relative_lambda2,q_bottleneck,q_balance,baseline_path,spectral_path,"
         "selected_path,baseline_combined,spectral_combined,route_regret,"
         "switch_penalty,lock_debt,baseline_switches,spectral_switches,"
-        "effective_frontiers,raw_reachable_frontiers,actionable_frontiers,"
-        "quarantined_frontiers,raw_spectral_nodes,"
+        "effective_frontiers,quarantined_frontiers,raw_spectral_nodes,"
         "compressed_spectral_nodes,submitted_jobs,stale_results,timeout_results";
     message.layout.dim[0].label +=
         ",mode_toggles,recovery_count,frontier_reassignments,repeated_targets,"
         "label_change_rate,spectral_route_utilization,solver_type,"
-        "solver_iterations,solver_warm_start,collect_active_ms,"
-        "distance_matrix_ms,raw_snapshot_copy_ms,support_graph_ms,"
-        "compression_ms,ncut_ms,confidence_ms,baseline_route_ms,"
-        "candidate_route_ms,path_to_first_ms,worker_total_ms,"
-        "cooldown_remaining,main_snapshot_overruns,worker_budget_overruns,"
-        "spectral_cooldowns";
+        "solver_iterations,solver_warm_start";
     message.data = {
         ros::WallTime::now().toSec(),
         static_cast<double>(global_plan_diagnostics_.status),
@@ -105,10 +97,6 @@ void MultiDtgPlus::PublishGlobalPlanDiagnostics(){
         static_cast<double>(global_plan_diagnostics_.baseline_switches),
         static_cast<double>(global_plan_diagnostics_.spectral_switches),
         static_cast<double>(global_plan_diagnostics_.effective_frontier_count),
-        static_cast<double>(
-            global_plan_diagnostics_.raw_reachable_frontier_count),
-        static_cast<double>(
-            global_plan_diagnostics_.actionable_frontier_count),
         static_cast<double>(global_plan_diagnostics_.quarantined_frontier_count),
         static_cast<double>(global_plan_diagnostics_.raw_spectral_nodes),
         static_cast<double>(global_plan_diagnostics_.compressed_spectral_nodes),
@@ -123,51 +111,10 @@ void MultiDtgPlus::PublishGlobalPlanDiagnostics(){
         global_plan_diagnostics_.spectral_route_utilization,
         static_cast<double>(global_plan_diagnostics_.spectral_solver_type),
         static_cast<double>(global_plan_diagnostics_.spectral_solver_iterations),
-        global_plan_diagnostics_.spectral_warm_start_used ? 1.0 : 0.0,
-        global_plan_diagnostics_.collect_active_ms,
-        global_plan_diagnostics_.distance_matrix_ms,
-        global_plan_diagnostics_.raw_snapshot_copy_ms,
-        global_plan_diagnostics_.support_graph_ms,
-        global_plan_diagnostics_.compression_ms,
-        global_plan_diagnostics_.spectral_ncut_ms,
-        global_plan_diagnostics_.confidence_ms,
-        global_plan_diagnostics_.baseline_route_ms,
-        global_plan_diagnostics_.candidate_route_ms,
-        global_plan_diagnostics_.path_to_first_ms,
-        global_plan_diagnostics_.spectral_worker_total_ms,
-        global_plan_diagnostics_.spectral_cooldown_remaining,
-        static_cast<double>(
-            global_plan_diagnostics_.main_snapshot_overruns),
-        static_cast<double>(
-            global_plan_diagnostics_.worker_budget_overruns),
-        static_cast<double>(
-            global_plan_diagnostics_.spectral_cooldowns)};
+        global_plan_diagnostics_.spectral_warm_start_used ? 1.0 : 0.0};
     message.layout.dim[0].size = message.data.size();
     message.layout.dim[0].stride = message.data.size();
     spectral_diag_pub_.publish(message);
-
-    ROS_INFO_THROTTLE(
-        1.0,
-        "[SpectralV3] mode=%d nodes=%zu rawF=%zu actionF=%zu "
-        "collect=%.2fms dist=%.2fms raw=%.2fms support=%.2fms "
-        "compress=%.2fms solve=%.2fms ncut=%.2fms conf=%.3f "
-        "route=%d regret=%.3f cooldown=%.1fs fallback=%s",
-        global_plan_diagnostics_.spectral_mode,
-        global_plan_diagnostics_.compressed_spectral_nodes,
-        global_plan_diagnostics_.raw_reachable_frontier_count,
-        global_plan_diagnostics_.actionable_frontier_count,
-        global_plan_diagnostics_.collect_active_ms,
-        global_plan_diagnostics_.distance_matrix_ms,
-        global_plan_diagnostics_.raw_snapshot_copy_ms,
-        global_plan_diagnostics_.support_graph_ms,
-        global_plan_diagnostics_.compression_ms,
-        global_plan_diagnostics_.spectral_solve_ms,
-        global_plan_diagnostics_.spectral_ncut_ms,
-        global_plan_diagnostics_.partition_confidence,
-        global_plan_diagnostics_.route_decision,
-        global_plan_diagnostics_.route_regret,
-        global_plan_diagnostics_.spectral_cooldown_remaining,
-        global_plan_diagnostics_.used_fallback ? "true" : "false");
 
     if(global_plan_diagnostics_.used_fallback ||
        global_plan_diagnostics_.status != GlobalPlanStatus::SUCCESS ||
@@ -179,9 +126,7 @@ void MultiDtgPlus::PublishGlobalPlanDiagnostics(){
 }
 
 bool MultiDtgPlus::IsActiveBoundary(const h_ptr &h) const{
-    return collect_raw_frontiers_
-        ? HasRawReachableFrontier(h)
-        : HasEffectiveFrontier(h, -1);
+    return HasEffectiveFrontier(h, -1);
 }
 
 bool MultiDtgPlus::HasAnyActiveBoundary() const{
@@ -195,12 +140,6 @@ GlobalPlanStatus MultiDtgPlus::CollectActiveBoundaryRegions(
     const Eigen::Vector3d &ps, GlobalRouteContext &context,
     bool populate_missing_pair_distances){
     context = GlobalRouteContext();
-    const double collect_start = ros::WallTime::now().toSec();
-    const auto finish_collect = [&](GlobalPlanStatus status){
-        context.collect_active_ms =
-            (ros::WallTime::now().toSec() - collect_start) * 1000.0;
-        return status;
-    };
 
     list<h_ptr> local_hnodes;
     GetHnodesBBX(LRM_->local_map_upbd_, LRM_->local_map_lowbd_, local_hnodes);
@@ -233,40 +172,28 @@ GlobalPlanStatus MultiDtgPlus::CollectActiveBoundaryRegions(
     }
 
     if(context.seed_hnodes.empty()){
-        return finish_collect(
-            HasAnyActiveBoundary() ? GlobalPlanStatus::NO_FEASIBLE_SEED
-                                   : GlobalPlanStatus::NO_ACTIVE_FRONTIER);
+        return HasAnyActiveBoundary() ? GlobalPlanStatus::NO_FEASIBLE_SEED
+                                      : GlobalPlanStatus::NO_ACTIVE_FRONTIER;
     }
 
     ParallelDijkstra(context.seed_hnodes, context.seed_distances,
-        context.active_hnodes, context.root_paths,
-        &context.raw_reachable_hnodes, &context.raw_root_paths);
+        context.active_hnodes, context.root_paths);
     if(context.active_hnodes.empty()){
-        return finish_collect(
-            HasAnyActiveBoundary() ? GlobalPlanStatus::GRAPH_DISCONNECTED
-                                   : GlobalPlanStatus::NO_ACTIVE_FRONTIER);
+        return HasAnyActiveBoundary() ? GlobalPlanStatus::GRAPH_DISCONNECTED
+                                      : GlobalPlanStatus::NO_ACTIVE_FRONTIER;
     }
 
     for(size_t i = 0; i < context.active_hnodes.size(); ++i){
         context.active_index[context.active_hnodes[i]->id_] = i;
     }
-    context.collect_active_ms =
-        (ros::WallTime::now().toSec() - collect_start) * 1000.0;
-    return BuildActiveDistanceMatrix(
-        context, populate_missing_pair_distances);
+    return BuildActiveDistanceMatrix(context, populate_missing_pair_distances);
 }
 
 GlobalPlanStatus MultiDtgPlus::BuildActiveDistanceMatrix(
     GlobalRouteContext &context, bool populate_missing_pair_distances){
-    const double matrix_start = ros::WallTime::now().toSec();
-    const auto finish_matrix = [&](GlobalPlanStatus status){
-        context.distance_matrix_ms =
-            (ros::WallTime::now().toSec() - matrix_start) * 1000.0;
-        return status;
-    };
     const size_t n = context.active_hnodes.size();
     if(n == 0 || context.root_paths.size() != n){
-        return finish_matrix(GlobalPlanStatus::NO_ACTIVE_FRONTIER);
+        return GlobalPlanStatus::NO_ACTIVE_FRONTIER;
     }
 
     context.distance_matrix = Eigen::MatrixXd::Constant(
@@ -311,25 +238,17 @@ GlobalPlanStatus MultiDtgPlus::BuildActiveDistanceMatrix(
             context.distance_matrix(c, r) = cached->second.distance;
         }
     }
-    return finish_matrix(GlobalPlanStatus::SUCCESS);
+    return GlobalPlanStatus::SUCCESS;
 }
 
 GlobalPlanStatus MultiDtgPlus::BuildPathToFirst(const Eigen::Vector3d &ps,
     const GlobalRouteContext &context, const h_ptr &first_h,
     vector<Eigen::Vector3d> &path2fh, double &d1){
-    const double path_start = ros::WallTime::now().toSec();
-    const auto finish_path = [&](GlobalPlanStatus status){
-        global_plan_diagnostics_.path_to_first_ms +=
-            (ros::WallTime::now().toSec() - path_start) * 1000.0;
-        return status;
-    };
-    if(first_h == nullptr || context.seed_hnodes.empty()){
-        return finish_path(GlobalPlanStatus::PATH_FAILED);
-    }
+    if(first_h == nullptr || context.seed_hnodes.empty()) return GlobalPlanStatus::PATH_FAILED;
     h_ptr target = first_h;
     if(!Astar(ps, context.seed_hnodes, context.seed_distances, target,
               context.seed_paths, path2fh, d1)){
-        return finish_path(GlobalPlanStatus::PATH_FAILED);
+        return GlobalPlanStatus::PATH_FAILED;
     }
     if(path2fh.empty()){
         if((ps - first_h->pos_).norm() < 1e-3){
@@ -337,10 +256,10 @@ GlobalPlanStatus MultiDtgPlus::BuildPathToFirst(const Eigen::Vector3d &ps,
             d1 = 0.0;
         }
         else{
-            return finish_path(GlobalPlanStatus::PATH_FAILED);
+            return GlobalPlanStatus::PATH_FAILED;
         }
     }
-    return finish_path(GlobalPlanStatus::SUCCESS);
+    return GlobalPlanStatus::SUCCESS;
 }
 
 GlobalPlanStatus MultiDtgPlus::RunEohdtFallback(const Eigen::Vector3d &ps,
@@ -458,7 +377,6 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     soft_route_selected_ = false;
     spectral_fallback_this_cycle_ = false;
     const double now = ros::WallTime::now().toSec();
-    GlobalRouteContext context;
 
     UpdateFrontierRuntimeStates();
     ReassignFrontierOwners();
@@ -504,31 +422,6 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
             evaluated_spectral_routes_ == 0U ? 0.0 :
             static_cast<double>(accepted_spectral_routes_) /
             static_cast<double>(evaluated_spectral_routes_);
-        global_plan_diagnostics_.collect_active_ms =
-            context.collect_active_ms;
-        global_plan_diagnostics_.distance_matrix_ms =
-            context.distance_matrix_ms;
-        global_plan_diagnostics_.raw_snapshot_copy_ms =
-            last_spectral_stage_timings_.raw_copy_ms;
-        global_plan_diagnostics_.support_graph_ms =
-            last_spectral_stage_timings_.support_graph_ms;
-        global_plan_diagnostics_.compression_ms =
-            last_spectral_stage_timings_.compression_ms;
-        global_plan_diagnostics_.spectral_ncut_ms =
-            last_spectral_stage_timings_.ncut_ms;
-        global_plan_diagnostics_.confidence_ms =
-            last_spectral_stage_timings_.confidence_ms;
-        global_plan_diagnostics_.spectral_worker_total_ms =
-            last_spectral_stage_timings_.worker_total_ms;
-        global_plan_diagnostics_.spectral_cooldown_remaining =
-            std::max(0.0, spectral_cooldown_until_ -
-                ros::WallTime::now().toSec());
-        global_plan_diagnostics_.main_snapshot_overruns =
-            main_snapshot_overrun_count_;
-        global_plan_diagnostics_.worker_budget_overruns =
-            worker_budget_overrun_count_;
-        global_plan_diagnostics_.spectral_cooldowns =
-            spectral_cooldown_count_;
         if(last_spectral_result_.success()){
             global_plan_diagnostics_.spectral_solver_type = static_cast<int>(
                 last_spectral_result_.diagnostics.solver_type);
@@ -537,12 +430,9 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
             global_plan_diagnostics_.spectral_warm_start_used =
                 last_spectral_result_.diagnostics.iterative_warm_start_used;
         }
-        global_plan_diagnostics_.actionable_frontier_count =
-            ActionableFrontierCount(&context);
-        global_plan_diagnostics_.raw_reachable_frontier_count =
-            RawReachableFrontierCount(&context);
+        double total_gain = 0.0;
         global_plan_diagnostics_.effective_frontier_count =
-            global_plan_diagnostics_.actionable_frontier_count;
+            EffectiveFrontierCount(&total_gain);
         global_plan_diagnostics_.quarantined_frontier_count = 0U;
         for(const auto &frontier : frontier_runtime_){
             if(frontier.second.state == FrontierState::QUARANTINED){
@@ -554,18 +444,10 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
         return result;
     };
 
+    GlobalRouteContext context;
     GlobalPlanStatus status = CollectActiveBoundaryRegions(
         ps, context, true);
-    std::string fail_open_reason;
-    if(status != GlobalPlanStatus::SUCCESS &&
-       ActionableFrontierCount(&context) == 0U &&
-       RawReachableFrontierCount(&context) > 0U &&
-       RestoreClosestRawFrontier(ps, context, fail_open_reason)){
-        status = GlobalPlanStatus::SUCCESS;
-    }
     if(status != GlobalPlanStatus::SUCCESS){
-        // Region completion is confirmed against distinct DTG update epochs,
-        // including the tail phase in which no active anchor remains.
         if(status == GlobalPlanStatus::NO_ACTIVE_FRONTIER && !regions_.empty()){
             UpdateRegionExecutionState(context);
             global_plan_diagnostics_.active_region_id = active_region_id_;
@@ -575,22 +457,16 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     }
     global_plan_diagnostics_.active_anchor_count = context.active_hnodes.size();
 
+    // ── Original V2/V3 pipeline ──
     std::string spectral_reason;
     ConsumeSpectralResult(context, now, spectral_reason);
-    if(!fail_open_reason.empty()){
-        spectral_reason = spectral_reason.empty()
-            ? fail_open_reason
-            : fail_open_reason + "; " + spectral_reason;
-    }
     ReassignFrontierOwners();
     UpdateRegionExecutionState(context);
     ReassignFrontierOwners();
     DetectAndHandleRegionStall(now);
 
     const bool late_stage = IsLateStage(context);
-    const bool spectral_cooling_down = now < spectral_cooldown_until_;
     if(!spectral_exec_config_.enabled || late_stage ||
-       spectral_cooling_down ||
        !spectral_graph_eligible_){
         UpdateSpectralRuntimeMode(false, false, now);
     }
@@ -610,7 +486,7 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
         global_plan_diagnostics_.residual_norm =
             last_spectral_result_.diagnostics.residual_norm;
         global_plan_diagnostics_.spectral_solve_ms =
-            last_spectral_result_.diagnostics.solve_time_ms;
+            last_spectral_result_.diagnostics.total_time_ms;
     }
     global_plan_diagnostics_.spectral_epoch = spectral_epoch_;
 
@@ -619,12 +495,8 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     vector<h_ptr> baseline_route;
     vector<Eigen::Vector3d> baseline_path;
     double baseline_d1 = 0.0;
-    const double baseline_route_start =
-        ros::WallTime::now().toSec();
     status = RunEohdtFallback(ps, context, baseline_route,
                               baseline_path, baseline_d1);
-    global_plan_diagnostics_.baseline_route_ms =
-        (ros::WallTime::now().toSec() - baseline_route_start) * 1000.0;
     if(status != GlobalPlanStatus::SUCCESS){
         route_h.clear();
         path2fh.clear();
@@ -662,8 +534,7 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     bool route_feedback_due =
         last_route_feedback_spectral_epoch_ != spectral_epoch_;
     const bool route_feedback_eligible = spectral_exec_config_.enabled &&
-        !late_stage && !spectral_cooling_down &&
-        spectral_graph_eligible_;
+        !late_stage && spectral_graph_eligible_;
     auto apply_route_feedback = [&](bool route_acceptable){
         if(!route_feedback_due) return;
         UpdateSpectralRuntimeMode(route_feedback_eligible,
@@ -680,8 +551,7 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
         spectral_mode_state_.mode == SpectralMode::ACTIVE_SOFT ||
         route_feedback_due;
     const bool can_evaluate_soft_route = spectral_exec_config_.enabled &&
-        !late_stage && !spectral_cooling_down &&
-        spectral_graph_eligible_ &&
+        !late_stage && spectral_graph_eligible_ &&
         !spectral_fallback_this_cycle_ &&
         spectral_mode_state_.mode != SpectralMode::RECOVERY &&
         stable_spectral_result_.has_valid_cut() &&
@@ -701,12 +571,7 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
                 : (stable_spectral_result_.has_valid_cut()
                     ? SpectralRouteDecision::MODE_INACTIVE
                     : SpectralRouteDecision::NO_STABLE_PARTITION));
-        if(spectral_cooling_down){
-            global_plan_diagnostics_.detail =
-                "spectral compute cooldown active; used original EOHDT";
-        }
-        else if(!stable_partition_fresh &&
-                stable_spectral_result_.has_valid_cut()){
+        if(!stable_partition_fresh && stable_spectral_result_.has_valid_cut()){
             global_plan_diagnostics_.detail =
                 "stable spectral partition exceeded version age; used original EOHDT";
         }
@@ -723,22 +588,10 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     const double switch_penalty = ComputeDynamicSwitchPenalty(
         spectral_exec_config_.switch_penalty_base,
         partition_confidence_result_.confidence, return_probability);
-    global_plan_diagnostics_.dynamic_switch_penalty = switch_penalty *
-        std::max(0.0,
-            spectral_exec_config_.first_target_switch_penalty_scale);
+    global_plan_diagnostics_.dynamic_switch_penalty = switch_penalty;
     vector<h_ptr> candidate_route;
-    size_t selected_baseline_index = 0U;
-    double baseline_first_distance = std::numeric_limits<double>::infinity();
-    double candidate_first_distance = std::numeric_limits<double>::infinity();
-    const double candidate_route_start =
-        ros::WallTime::now().toSec();
-    if(!BuildSpectralFirstTargetRoute(
-           context, baseline_route, candidate_route, switch_penalty,
-           selected_baseline_index, baseline_first_distance,
-           candidate_first_distance, spectral_reason)){
-        global_plan_diagnostics_.candidate_route_ms =
-            (ros::WallTime::now().toSec() -
-             candidate_route_start) * 1000.0;
+    if(!BuildRegionAwareRoute(context, candidate_route,
+                              switch_penalty, spectral_reason)){
         apply_route_feedback(false);
         decay_lock_debt();
         global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
@@ -749,42 +602,37 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
             "; used original EOHDT";
         return finish(GlobalPlanStatus::SUCCESS);
     }
-    global_plan_diagnostics_.candidate_route_ms =
-        (ros::WallTime::now().toSec() -
-         candidate_route_start) * 1000.0;
 
     const RouteMetrics candidate_metrics = ComputeRouteMetrics(context,
                                                                 candidate_route);
     ++evaluated_spectral_routes_;
+    RouteAcceptanceConfig acceptance;
+    acceptance.max_route_regret = spectral_exec_config_.max_route_regret;
+    acceptance.switch_penalty = switch_penalty;
+    acceptance.revisit_penalty = spectral_exec_config_.revisit_penalty_weight;
+    acceptance.numeric_epsilon = spectral_config_.numeric_epsilon;
+    const RouteDecision decision = EvaluateRegionRoute(
+        baseline_metrics, candidate_metrics, acceptance);
     global_plan_diagnostics_.spectral_path_cost = candidate_metrics.path_cost;
     global_plan_diagnostics_.spectral_switches = candidate_metrics.switch_count;
-    global_plan_diagnostics_.baseline_combined_cost = baseline_first_distance;
-    global_plan_diagnostics_.spectral_combined_cost = candidate_first_distance;
-    const double first_distance_denominator = std::max(
-        baseline_first_distance, std::max(
-            spectral_config_.numeric_epsilon, 1.0e-9));
-    const double first_target_regret =
-        (candidate_first_distance - baseline_first_distance) /
-        first_distance_denominator;
-    global_plan_diagnostics_.route_regret = first_target_regret;
-    const double maximum_first_distance = baseline_first_distance *
-        (1.0 + std::max(0.0,
-            spectral_exec_config_.first_target_max_regret));
-    const bool within_first_target_regret =
-        std::isfinite(candidate_first_distance) &&
-        candidate_first_distance <= maximum_first_distance +
-            std::max(spectral_config_.numeric_epsilon, 1.0e-9);
+    global_plan_diagnostics_.baseline_combined_cost =
+        decision.baseline_combined_cost;
+    global_plan_diagnostics_.spectral_combined_cost =
+        decision.candidate_combined_cost;
+    global_plan_diagnostics_.route_regret = decision.path_regret;
 
-    if(!within_first_target_regret){
+    if(!decision.accepted){
         apply_route_feedback(false);
         decay_lock_debt();
         global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
         global_plan_diagnostics_.used_fallback = true;
         global_plan_diagnostics_.route_decision = static_cast<int>(
-            SpectralRouteDecision::REGRET_REJECTED);
-        global_plan_diagnostics_.detail =
-            "spectral first-target suggestion exceeded exact robot-path "
-            "regret guard; preserved complete EOHDT order";
+            decision.within_path_regret
+                ? SpectralRouteDecision::COMBINED_COST_REJECTED
+                : SpectralRouteDecision::REGRET_REJECTED);
+        global_plan_diagnostics_.detail = decision.within_path_regret
+            ? "region route did not improve combined cost; used original EOHDT"
+            : "region route rejected by path-regret guard; used original EOHDT";
         return finish(GlobalPlanStatus::SUCCESS);
     }
 
@@ -793,24 +641,19 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     const bool candidate_targets_active_region = active_region_id_ >= 0 &&
         !candidate_route.empty() &&
         RegionForHnode(candidate_route.front()) == active_region_id_;
-    if(selected_baseline_index != 0U){
-        const GlobalPlanStatus candidate_path_status = BuildPathToFirst(
-            ps, context, candidate_route.front(), candidate_path, candidate_d1);
-        if(candidate_path_status != GlobalPlanStatus::SUCCESS){
-            apply_route_feedback(false);
-            if(candidate_targets_active_region){
-                RecordActiveRegionPathResult(false);
-            }
-            decay_lock_debt();
-            global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-            global_plan_diagnostics_.used_fallback = true;
-            global_plan_diagnostics_.route_decision = static_cast<int>(
-                SpectralRouteDecision::CANDIDATE_PATH_FAILED);
-            global_plan_diagnostics_.detail =
-                "spectral first-target path failed; preserved complete "
-                "EOHDT order";
-            return finish(GlobalPlanStatus::SUCCESS);
-        }
+    const GlobalPlanStatus candidate_path_status = BuildPathToFirst(
+        ps, context, candidate_route.front(), candidate_path, candidate_d1);
+    if(candidate_path_status != GlobalPlanStatus::SUCCESS){
+        apply_route_feedback(false);
+        if(candidate_targets_active_region) RecordActiveRegionPathResult(false);
+        decay_lock_debt();
+        global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
+        global_plan_diagnostics_.used_fallback = true;
+        global_plan_diagnostics_.route_decision = static_cast<int>(
+            SpectralRouteDecision::CANDIDATE_PATH_FAILED);
+        global_plan_diagnostics_.detail =
+            "region-route first path failed; used original EOHDT";
+        return finish(GlobalPlanStatus::SUCCESS);
     }
 
     const bool mode_was_active_before_feedback =
@@ -845,24 +688,22 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
         return finish(GlobalPlanStatus::SUCCESS);
     }
 
-    // top_k=1 is explicit observation mode.  If the spectral score keeps the
-    // original first anchor, the complete EOHDT route remains untouched.
-    if(selected_baseline_index == 0U){
-        decay_lock_debt();
+    const LockDebtUpdate debt = UpdateLockDebt(lock_debt_,
+        candidate_metrics.path_cost, baseline_metrics.path_cost,
+        {spectral_exec_config_.lock_debt_decay,
+         spectral_exec_config_.lock_debt_max});
+    lock_debt_ = debt.debt;
+    if(debt.recovery_required){
+        EnterRecovery(RecoveryReason::LOCK_DEBT, now);
         global_plan_diagnostics_.method = GlobalPlanMethod::EOHDT_FALLBACK;
-        global_plan_diagnostics_.used_fallback = false;
+        global_plan_diagnostics_.used_fallback = true;
         global_plan_diagnostics_.route_decision = static_cast<int>(
-            SpectralRouteDecision::MODE_INACTIVE);
+            SpectralRouteDecision::RECOVERY_BASELINE);
         global_plan_diagnostics_.detail =
-            spectral_exec_config_.spectral_first_target_top_k <= 1
-            ? "spectral first-target observation mode (top_k=1); preserved "
-              "complete EOHDT order"
-            : "EOHDT first anchor remained the best guarded prefix target; "
-              "preserved complete EOHDT order";
+            "accumulated detour debt entered recovery; used original EOHDT";
         return finish(GlobalPlanStatus::SUCCESS);
     }
 
-    decay_lock_debt();
     route_h = std::move(candidate_route);
     path2fh = std::move(candidate_path);
     d1 = candidate_d1;
@@ -875,8 +716,7 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     global_plan_diagnostics_.route_decision = static_cast<int>(
         SpectralRouteDecision::ACCEPTED);
     global_plan_diagnostics_.detail =
-        "accepted spectral suggestion for the first EOHDT-prefix target; "
-        "all remaining anchors preserve their EOHDT order";
+        "accepted Spectral-v2 soft regional route within regret bound";
     return finish(GlobalPlanStatus::SUCCESS);
 }
 

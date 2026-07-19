@@ -79,8 +79,7 @@ enum class RecoveryReason{
     REGION_STALL,
     PARTITION_CHANGE,
     SPECTRAL_TIMEOUTS,
-    REPEATED_TARGET,
-    FRONTIER_FAIL_OPEN
+    REPEATED_TARGET
 };
 
 enum class SpectralRouteDecision{
@@ -117,6 +116,16 @@ enum class SpectralGraphMode{
     SUPPORT_SPARSE = 1
 };
 
+// ── Spectral-EDEN V4: toggle to skip V2/V3 preprocessing ──
+struct SpectralV4Config{
+    bool    enabled = false;
+    bool    log_diagnostics = true;
+    int     skeleton_max_nodes = 48;
+    int     local_frontier_top_k = 8;
+    double  target_switch_margin = 0.25;
+    double  min_target_commit_sec = 1.0;
+};
+
 /**
  * @brief Online execution policy around the pure spectral eigensolver.
  *
@@ -130,6 +139,7 @@ struct SpectralExecutionConfig{
     bool partition_enabled = true;
     bool region_lock_enabled = true;
     bool log_diagnostics = true;
+    bool async_solve = true;
     bool corridor_compression = true;
     SpectralGraphMode graph_mode = SpectralGraphMode::SUPPORT_SPARSE;
 
@@ -150,7 +160,8 @@ struct SpectralExecutionConfig{
     int late_stage_no_cut_epochs = 10;
     int frontier_low_gain_cycles = 2;
     int frontier_actual_gain_eps = 10;
-    int over_budget_limit = 3;
+    int repeat_target_limit = 3;
+    int spectral_timeout_limit = 3;
 
     double lambda2_threshold = 0.15;
     double eigengap_threshold = 0.02;
@@ -163,12 +174,10 @@ struct SpectralExecutionConfig{
     double route_terminal_bias = 0.25;
     double spectral_view_weight = 0.0;
     double cross_region_weight = 0.3;
+    double spectral_time_budget_ms = 10.0;
     double update_period = 0.20;
-    double spectral_min_update_interval = 1.0;
-    double spectral_max_update_interval = 5.0;
-    double main_thread_snapshot_budget_ms = 3.0;
-    double worker_warning_budget_ms = 20.0;
-    double cooldown_duration = 10.0;
+    double spectral_min_update_interval = 0.5;
+    double spectral_max_update_interval = 3.0;
 
     // Continuous partition confidence.  The five weights are normalized at
     // start-up, so experiments may tune them without maintaining an exact
@@ -184,28 +193,20 @@ struct SpectralExecutionConfig{
     double partition_confidence_off = 0.40;
 
     // Spectral-v2 route protection and recovery policy.
-    double max_route_regret = 0.0;
-    double switch_penalty_base = 0.0;
-    double revisit_penalty_weight = 0.0;
+    double max_route_regret = 0.05;
+    double switch_penalty_base = 2.0;
+    double revisit_penalty_weight = 1.0;
     double neighbor_override_distance = 2.0;
     double neighbor_override_margin = 0.5;
     double lock_debt_decay = 0.90;
-    double lock_debt_max = 0.0;
+    double lock_debt_max = 8.0;
     double recovery_duration = 5.0;
 
-    // V3 keeps the EOHDT route authoritative.  Spectral information may only
-    // suggest a different first anchor from this prefix; k=1 is observation
-    // mode and therefore cannot change the baseline route.
-    int spectral_first_target_top_k = 1;
-    double first_target_max_regret = 0.02;
-    double first_target_switch_penalty_scale = 0.10;
-
-    // Late-stage and frontier watchdogs.  unknown_num is only a ranking
-    // signal: low expected gain must never invalidate or quarantine an
-    // otherwise reachable frontier.
+    // Late-stage and effective-frontier watchdogs.  unknown_num is used as a
+    // cheap online gain proxy; actual executed-target gain is tracked
+    // separately by FrontierRuntimeState.
     double late_stage_total_gain = 50.0;
     double frontier_expected_gain_eps = 1.0;
-    double low_expected_gain_scale = 0.25;
     double frontier_quarantine_time = 5.0;
     double region_stall_window = 8.0;
     double region_stall_timeout = 12.0;
@@ -294,8 +295,6 @@ struct GlobalPlanDiagnostics{
     size_t baseline_switches = 0;
     size_t spectral_switches = 0;
     size_t effective_frontier_count = 0;
-    size_t raw_reachable_frontier_count = 0;
-    size_t actionable_frontier_count = 0;
     size_t quarantined_frontier_count = 0;
     size_t raw_spectral_nodes = 0;
     size_t compressed_spectral_nodes = 0;
@@ -308,21 +307,6 @@ struct GlobalPlanDiagnostics{
     uint64_t repeated_targets = 0;
     double label_change_rate = 0.0;
     double spectral_route_utilization = 0.0;
-    double collect_active_ms = 0.0;
-    double distance_matrix_ms = 0.0;
-    double raw_snapshot_copy_ms = 0.0;
-    double support_graph_ms = 0.0;
-    double compression_ms = 0.0;
-    double spectral_ncut_ms = 0.0;
-    double confidence_ms = 0.0;
-    double baseline_route_ms = 0.0;
-    double candidate_route_ms = 0.0;
-    double path_to_first_ms = 0.0;
-    double spectral_worker_total_ms = 0.0;
-    double spectral_cooldown_remaining = 0.0;
-    uint64_t main_snapshot_overruns = 0;
-    uint64_t worker_budget_overruns = 0;
-    uint64_t spectral_cooldowns = 0;
 };
 
 template <typename HeadNode, typename TailNode>

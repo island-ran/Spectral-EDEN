@@ -56,6 +56,10 @@
 
     <node name="rvizvisualisation" pkg="rviz" type="rviz" output="screen" args="-d $(find eden)/rviz/eden_demo_m_lite.rviz" />
 
+    <!-- Auto-start exploration after RViz loads -->
+    <node name="auto_trigger" pkg="rostopic" type="rostopic" output="screen"
+        args="pub -1 /start_trigger std_msgs/Empty"
+        launch-prefix="bash -c 'sleep 5; $0 $@'" />
 
     <!-- <node pkg="rosbag" type="record" name="bag_record" args="
         /uav_simulator/odometry

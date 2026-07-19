@@ -1,62 +1,4 @@
 #include <eden/eden.h>
-#include <eden/eden_safety.h>
-
-namespace {
-
-constexpr double kMinTrajectoryDuration = 1.0e-6;
-
-bool ValidateCorridorGroup(const vector<Eigen::MatrixX4d> &corridors,
-                           const vector<Eigen::Matrix3Xd> &vertices,
-                           const char *name,
-                           std::string &reason){
-    if(corridors.empty()){
-        reason = std::string(name) + " corridor is empty";
-        return false;
-    }
-    if(corridors.size() != vertices.size()){
-        reason = std::string(name) + " corridor/vertex count mismatch";
-        return false;
-    }
-    for(std::size_t i = 0; i < corridors.size(); ++i){
-        if(corridors[i].rows() < 6 || corridors[i].cols() != 4 ||
-           !corridors[i].allFinite()){
-            reason = std::string(name) + " corridor contains invalid coefficients";
-            return false;
-        }
-        if(vertices[i].rows() != 3 || vertices[i].cols() <= 0 ||
-           !vertices[i].allFinite()){
-            reason = std::string(name) + " corridor vertices are invalid";
-            return false;
-        }
-    }
-    return true;
-}
-
-bool PopulateCorridorBounds(
-    const vector<Eigen::Matrix3Xd> &vertices,
-    vector<pair<Eigen::Vector3d, Eigen::Vector3d>> &bounds,
-    std::string &reason){
-    bounds.clear();
-    bounds.reserve(vertices.size());
-    for(std::size_t i = 0; i < vertices.size(); ++i){
-        if(vertices[i].rows() != 3 || vertices[i].cols() <= 0 ||
-           !vertices[i].allFinite()){
-            reason = "cannot compute bounds for invalid corridor vertices";
-            return false;
-        }
-        Eigen::Vector3d upper = vertices[i].rowwise().maxCoeff();
-        Eigen::Vector3d lower = vertices[i].rowwise().minCoeff();
-        if(!upper.allFinite() || !lower.allFinite() ||
-           (upper.array() < lower.array()).any()){
-            reason = "computed corridor bounds are invalid";
-            return false;
-        }
-        bounds.emplace_back(upper, lower);
-    }
-    return true;
-}
-
-}  // namespace
 
 
 void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
@@ -93,17 +35,6 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     // nh_private.param(ns + "/Exp/UseCoverTrajectory", use_cover_trajectory_, true);
     // nh_private.param(ns + "/Exp/VolumeTest", volume_test_, false);
     nh_private.param(ns + "/Exp/UpdateInterval", update_interval_, 0.2);
-    nh_private.param(ns + "/Exp/FinishConfirmCycles", finish_confirm_cycles_, 5);
-    nh_private.param(ns + "/Exp/FinishStableDuration", finish_stable_duration_, 2.0);
-    nh_private.param(ns + "/Exp/FinishTotalGainThreshold", finish_total_gain_threshold_, 10.0);
-    nh_private.param(ns + "/Exp/SensorFreshnessTimeout", sensor_freshness_timeout_, 1.0);
-    nh_private.param(ns + "/Exp/VolumeCoverageEnabled", volume_coverage_enabled_, false);
-    nh_private.param(ns + "/Exp/VolumeCoverageThreshold", volume_coverage_threshold_, 0.99);
-    nh_private.param(ns + "/Exp/TotalExplorableVolume", total_explorable_volume_, 0.0);
-    if(volume_coverage_enabled_ && !stat_){
-        ROS_WARN("VolumeCoverageEnabled requires Exp/statistic; volume coverage will not "
-            "be used for completion");
-    }
 
     // use_dir_corridor_ = use_dir_corridor_ & use_terminal_corridor_;
     // cout<<"=======------"<<use_dir_corridor_<<endl;
@@ -157,33 +88,12 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
 
     TrajOpt_.Init(nh, nh_private);
 
-    finish_confirm_cycles_ = std::max(finish_confirm_cycles_, 1);
-    finish_stable_duration_ = std::max(finish_stable_duration_, 0.0);
-    finish_total_gain_threshold_ = std::max(finish_total_gain_threshold_, 0.0);
-    sensor_freshness_timeout_ = std::max(sensor_freshness_timeout_, 0.0);
-    if(!std::isfinite(volume_coverage_threshold_)){
-        volume_coverage_threshold_ = 0.99;
-    }
-    volume_coverage_threshold_ =
-        std::max(0.0, std::min(volume_coverage_threshold_, 1.0));
-    if(!std::isfinite(total_explorable_volume_) ||
-       total_explorable_volume_ <= 0.0){
-        total_explorable_volume_ = 0.0;
-    }
-
     last_map_update_t_ = ros::WallTime::now().toSec();
-    last_sensor_update_t_ = -std::numeric_limits<double>::infinity();
     traj_end_t_ = last_map_update_t_ - 0.1;
     have_odom_ = false;
     target_f_id_ = -1;
     target_v_id_ = -1;
     dtg_flag_ = false;
-    hold_position_valid_ = false;
-    finish_confirm_count_ = 0;
-    last_finish_frontier_epoch_ = 0;
-    finish_stable_since_ = -1.0;
-    volume_finish_stable_since_ = -1.0;
-    last_global_plan_status_ = DTGPlus::GlobalPlanStatus::INTERNAL_ERROR;
     traj_start_t_ = last_map_update_t_ - 0.2;
     if(EROI_.sensor_type_ == SensorType::CAMERA){
         depth_sub_.reset(new message_filters::Subscriber<sensor_msgs::Image>(nh_, "/depth", 10));
@@ -216,185 +126,8 @@ void SingleExp::SetPlanInterval(const double &intv){
     plan_t_ = ros::WallTime::now().toSec() + intv;
 }
 
-void SingleExp::ResetFinishConfirmation(){
-    finish_confirm_count_ = 0;
-    finish_stable_since_ = -1.0;
-    last_finish_frontier_epoch_ = DTG_.frontier_epoch();
-}
-
-void SingleExp::ResetExplorationState(){
-    ResetFinishConfirmation();
-    volume_finish_stable_since_ = -1.0;
-    last_global_plan_status_ = DTGPlus::GlobalPlanStatus::INTERNAL_ERROR;
-    target_f_id_ = -1;
-    target_v_id_ = -1;
-    dtg_flag_ = false;
-    hold_position_valid_ = false;
-}
-
-bool SingleExp::ValidateTrajectory(const Trajectory4<5> &trajectory,
-                                   std::string &reason) const{
-    return EdenSafety::ValidateTrajectory(trajectory, &reason);
-}
-
-bool SingleExp::ValidateTrajectoryInput(const TrajOptInput &input,
-                                        uint8_t plan_res,
-                                        std::string &reason) const{
-    if(input.initState.rows() != 4 || input.initState.cols() != 3 ||
-       !input.initState.allFinite()){
-        reason = "initial state is invalid";
-        return false;
-    }
-    if(input.camFov.rows() <= 0 || input.camFov.cols() != 4 ||
-       !input.camFov.allFinite() ||
-       input.camV.rows() != 3 || input.camV.cols() <= 0 ||
-       !input.camV.allFinite()){
-        reason = "camera geometry is invalid";
-        return false;
-    }
-
-    if(plan_res == 2){
-        if(!input.endState_stem.allFinite() ||
-           !input.endState_main.allFinite() ||
-           !input.endState_sub.allFinite()){
-            reason = "branch terminal state is invalid";
-            return false;
-        }
-        return ValidateCorridorGroup(
-                   input.corridors_stem, input.corridorVs_stem,
-                   "stem", reason) &&
-               ValidateCorridorGroup(
-                   input.corridors_main, input.corridorVs_main,
-                   "main", reason) &&
-               ValidateCorridorGroup(
-                   input.corridors_sub, input.corridorVs_sub,
-                   "sub", reason);
-    }
-    if(plan_res == 3){
-        if(!input.endState_norm.allFinite()){
-            reason = "normal terminal state is invalid";
-            return false;
-        }
-        return ValidateCorridorGroup(
-            input.corridors_norm, input.corridorVs_norm, "normal", reason);
-    }
-
-    reason = "unsupported trajectory plan type";
-    return false;
-}
-
-bool SingleExp::ValidatePath(const vector<Eigen::Vector3d> &path,
-                             bool allow_unknown,
-                             std::string &reason){
-    if(path.empty()){
-        reason = "path is empty";
-        return false;
-    }
-    for(std::size_t i = 0; i < path.size(); ++i){
-        if(!path[i].allFinite()){
-            reason = "path contains NaN or Inf at index " +
-                std::to_string(i);
-            return false;
-        }
-        if(!LRM_.IsFeasible(path[i], allow_unknown)){
-            reason = "path contains an infeasible point at index " +
-                std::to_string(i);
-            return false;
-        }
-    }
-    reason.clear();
-    return true;
-}
-
-bool SingleExp::VolumeCoverageReached(){
-    const double explored_volume = stat_
-        ? CS_.GetVolume(0)
-        : std::numeric_limits<double>::quiet_NaN();
-    const double now = ros::WallTime::now().toSec();
-    double ratio = std::numeric_limits<double>::quiet_NaN();
-    const bool reached = EdenSafety::UpdateKnownVolumeCompletion(
-        volume_coverage_enabled_, stat_, explored_volume,
-        total_explorable_volume_, volume_coverage_threshold_,
-        finish_stable_duration_, now, &volume_finish_stable_since_, &ratio);
-    if(volume_coverage_enabled_ && stat_ && !std::isfinite(ratio)){
-        ROS_ERROR_THROTTLE(1.0, "[EDEN] invalid known-volume coverage measurement");
-        return false;
-    }
-    if(!std::isfinite(ratio) || ratio < volume_coverage_threshold_){
-        return false;
-    }
-
-    const double stable_duration = now - volume_finish_stable_since_;
-    ROS_WARN_THROTTLE(
-        1.0,
-        "[EDEN] known-volume finish pending: %.2f%%/%.2f%%, stable %.2f/%.2fs",
-        ratio * 100.0, volume_coverage_threshold_ * 100.0,
-        stable_duration, finish_stable_duration_);
-    return reached;
-}
-
-double SingleExp::ComputeRemainingInformationGain() const{
-    double total_gain = 0.0;
-    for(std::size_t f_id = 0; f_id < EROI_.EROI_.size(); ++f_id){
-        const auto &frontier = EROI_.EROI_[f_id];
-        if(frontier.f_state_ != 1) continue;
-
-        std::unordered_set<int> visited_viewpoints;
-        for(const auto raw_v_id : frontier.valid_vps_){
-            const int v_id = static_cast<int>(raw_v_id);
-            if(v_id < 0 || static_cast<std::size_t>(v_id) >= frontier.local_vps_.size()) continue;
-            if(frontier.local_vps_[v_id] != 1 || !visited_viewpoints.insert(v_id).second) continue;
-
-            const double gain = EROI_.GetGain(static_cast<int>(f_id), v_id);
-            if(std::isfinite(gain) && gain > 0.0) total_gain += gain;
-        }
-    }
-    return total_gain;
-}
-
-void SingleExp::PublishHoldPosition(){
-    if(!have_odom_) return;
-    if(!p_.allFinite()){
-        ROS_ERROR_THROTTLE(1.0, "[EDEN] refusing to publish a non-finite hold position");
-        return;
-    }
-
-    if(!hold_position_valid_){
-        hold_position_ = p_;
-        hold_position_(2) += 1e-4;
-        hold_position_valid_ = true;
-    }
-
-    swarm_exp_msgs::LocalTraj hold;
-    hold.state = 1;
-    hold.start_t = ros::WallTime::now().toSec();
-    hold.recover_pt.x = hold_position_(0);
-    hold.recover_pt.y = hold_position_(1);
-    // The trajectory executor normalizes the displacement to recover_pt.  A
-    // tiny non-zero offset avoids normalizing an exact zero vector while still
-    // behaving as a position hold.
-    hold.recover_pt.z = hold_position_(2);
-    traj_pub_.publish(hold);
-}
-
 bool SingleExp::TrajCheck(){
-    std::string reason;
-    if(!ValidateTrajectory(exc_traj_, reason)){
-        ROS_ERROR_STREAM("[EDEN] invalid active trajectory in TrajCheck: " << reason);
-        dtg_flag_ = false;
-        return false;
-    }
-    if(!std::isfinite(traj_start_t_) || !std::isfinite(traj_end_t_) ||
-       !std::isfinite(replan_t_) || !std::isfinite(check_duration_) ||
-       check_duration_ <= 0.0 || !std::isfinite(BM_.resolution_) ||
-       BM_.resolution_ <= 0.0){
-        ROS_ERROR("[EDEN] invalid trajectory timing in TrajCheck");
-        dtg_flag_ = false;
-        return false;
-    }
-
-    const double total_duration = exc_traj_.getTotalDuration();
-    const double cur_t = std::max(ros::WallTime::now().toSec(), traj_start_t_);
+    double cur_t = max(ros::WallTime::now().toSec(), traj_start_t_);
 
     if(cur_t > traj_end_t_ - 1e-3 || cur_t > replan_t_) { // traj time out
         ROS_WARN("traj time up");
@@ -402,35 +135,14 @@ bool SingleExp::TrajCheck(){
         return false;
     }
 
-    const double end_t = std::min(cur_t + check_duration_, replan_t_ - 1e-3);
-    const double relative_cur_t = EdenSafety::RelativeTrajectoryTime(
-        cur_t, traj_start_t_, total_duration);
-    const Eigen::Vector4d last_state = exc_traj_.getPos(relative_cur_t);
-    if(!last_state.allFinite()){
-        ROS_ERROR("[EDEN] non-finite trajectory state in TrajCheck");
-        dtg_flag_ = false;
-        return false;
-    }
-
-    Eigen::Vector3d last_p = last_state.head(3);
+    double end_t = min(cur_t + check_duration_, replan_t_ - 1e-3);
+    // end_t -= traj_start_t_;
+    Eigen::Vector3d last_p = exc_traj_.getPos(cur_t).head(3);
     Eigen::Vector3d p, r_size;
     r_size = LRM_.GetRobotSize();
-    if(!r_size.allFinite() || (r_size.array() <= 0.0).any()){
-        ROS_ERROR("[EDEN] invalid robot size in TrajCheck");
-        dtg_flag_ = false;
-        return false;
-    }
     // vector<Eigen::Vector3d> debug_pts;
     for(double t = cur_t; t < end_t; t += 0.05){
-        const double relative_t = EdenSafety::RelativeTrajectoryTime(
-            t, traj_start_t_, total_duration);
-        const Eigen::Vector4d state = exc_traj_.getPos(relative_t);
-        if(!state.allFinite()){
-            ROS_ERROR("[EDEN] non-finite sampled trajectory state in TrajCheck");
-            dtg_flag_ = false;
-            return false;
-        }
-        p = state.head(3);
+        p = exc_traj_.getPos(t - traj_start_t_).head(3);
         // debug_pts.emplace_back(p.head(3));
         for(int dim = 0; dim < 3; dim ++){
             if(abs(p(dim) - last_p(dim)) > BM_.resolution_){ 
@@ -439,22 +151,13 @@ bool SingleExp::TrajCheck(){
                     ROS_WARN("collide");
                     return false;
                 }
-                last_p = p;
                 break;
             }
         }
     }
 
 
-    const double relative_end_t = EdenSafety::RelativeTrajectoryTime(
-        end_t - 1.0e-4, traj_start_t_, total_duration);
-    const Eigen::Vector4d end_state = exc_traj_.getPos(relative_end_t);
-    if(!end_state.allFinite()){
-        ROS_ERROR("[EDEN] non-finite trajectory end state in TrajCheck");
-        dtg_flag_ = false;
-        return false;
-    }
-    p = end_state.head(3);
+    p = exc_traj_.getPos(end_t - traj_start_t_ - 1e-4).head(3);
     if(BM_.PosBBXOccupied(p, r_size)) { // collide
         dtg_flag_ = false; // need to update map
         ROS_WARN("collide end");
@@ -470,10 +173,6 @@ int SingleExp::AllowPlan(const double &T){
     /* not satisfy plan interval */
     if(T - plan_t_ < 0){
         return 1;
-    }
-
-    if(!have_odom_){
-        return 3;
     }
 
     /* not in free space */
@@ -496,31 +195,11 @@ int SingleExp::AllowPlan(const double &T){
 }
 
 
-EdenPlanStatus SingleExp::EdenPlan(){
-    if(VolumeCoverageReached()){
-        const double ratio = CS_.GetVolume(0) / total_explorable_volume_;
-        ROS_WARN("[EDEN] known-volume coverage reached and stable (%.2f%% >= %.2f%%)",
-                 ratio * 100.0, volume_coverage_threshold_ * 100.0);
-        return EdenPlanStatus::FINISHED;
-    }
-
+bool SingleExp::EdenPlan(){
     Eigen::Vector3d ps, vs, as, pe, ve, ae;
     double ys, yds, ydds, ye, yde, ydde;
     double hand_t = max(ros::WallTime::now().toSec() + reach_out_t_, traj_start_t_); 
     double cur_t = ros::WallTime::now().toSec();
-    if(!std::isfinite(hand_t) || !std::isfinite(cur_t) ||
-       !std::isfinite(traj_start_t_) || !std::isfinite(traj_end_t_)){
-        ROS_ERROR("[EDEN] invalid absolute trajectory timing before planning");
-        return EdenPlanStatus::TRAJECTORY_FAILED;
-    }
-    if(cur_t <= traj_end_t_){
-        std::string active_reason;
-        if(!ValidateTrajectory(exc_traj_, active_reason)){
-            ROS_ERROR_STREAM("[EDEN] cannot sample active trajectory: "
-                             << active_reason);
-            return EdenPlanStatus::TRAJECTORY_FAILED;
-        }
-    }
     if(hand_t > traj_end_t_){
         if(cur_t - traj_end_t_ > 0.0){
             hand_t = ros::WallTime::now().toSec();
@@ -592,17 +271,7 @@ EdenPlanStatus SingleExp::EdenPlan(){
         yde = 0; 
         ydde = 0;
     }
-    if(!ps.allFinite() || !vs.allFinite() || !as.allFinite() ||
-       !std::isfinite(ys) || !std::isfinite(yds) ||
-       !std::isfinite(ydds)){
-        ROS_ERROR("[EDEN] invalid initial state for trajectory optimization");
-        return EdenPlanStatus::TRAJECTORY_FAILED;
-    }
     EROI_.YawNorm(ys);
-    if(!std::isfinite(ys)){
-        ROS_ERROR("[EDEN] yaw normalization produced a non-finite value");
-        return EdenPlanStatus::TRAJECTORY_FAILED;
-    }
 
     for(auto &f : EROI_.dead_fnodes_){
         cout<<"0erase dtg fn:"<<f.first<<"  v:"<<int(f.second)<<endl;
@@ -632,81 +301,12 @@ EdenPlanStatus SingleExp::EdenPlan(){
     vs_dy(3) = yds;
 
     double target_duration, corridor_duration, traj_duration;
-    const auto log_plan_timings = [&](){
-        double coverage_percent =
-            std::numeric_limits<double>::quiet_NaN();
-        if(stat_ && total_explorable_volume_ > 0.0){
-            coverage_percent =
-                100.0 * CS_.GetVolume(0) / total_explorable_volume_;
-        }
-        ROS_INFO_THROTTLE(
-            1.0,
-            "[EDEN] local_target=%.2fms corridor=%.2fms "
-            "trajectory=%.2fms coverage=%.2f%%",
-            target_duration * 1000.0,
-            corridor_duration * 1000.0,
-            traj_duration * 1000.0,
-            coverage_percent);
-    };
     double plan_ts = ros::WallTime::now().toSec();
-    last_global_plan_status_ = TargetPlanning(ps_y, vs_dy, plan_res,
+    TargetPlanning(ps_y, vs_dy, plan_res, 
         path_stem, path_main, path_sub, path_norm, 
         tar_stem, tar_main, tar_sub, tar_norm, 
         y_stem, y_main, y_sub, y_norm);
     target_duration = ros::WallTime::now().toSec() - plan_ts;
-
-    if(last_global_plan_status_ != DTGPlus::GlobalPlanStatus::SUCCESS){
-        if(last_global_plan_status_ == DTGPlus::GlobalPlanStatus::NO_ACTIVE_FRONTIER){
-            const auto summary = EROI_.GetExplorationSummary(false);
-            const double now = ros::WallTime::now().toSec();
-            const double remaining_gain = ComputeRemainingInformationGain();
-            const double sensor_age = now - last_sensor_update_t_;
-            const bool sensor_fresh = sensor_freshness_timeout_ <= 0.0 ||
-                (std::isfinite(last_sensor_update_t_) && sensor_age <= sensor_freshness_timeout_);
-            const bool no_effective_frontier = summary.alive_valid_vp_num_ == 0;
-            const bool no_pending_region = !DTG_.HasPendingRegions();
-            const bool low_total_gain = remaining_gain <= finish_total_gain_threshold_;
-            const bool finish_candidate = sensor_fresh && low_total_gain &&
-                no_effective_frontier && no_pending_region;
-            const uint64_t frontier_epoch = DTG_.frontier_epoch();
-
-            if(finish_candidate){
-                if(finish_stable_since_ < 0.0) finish_stable_since_ = now;
-                if(frontier_epoch != last_finish_frontier_epoch_){
-                    finish_confirm_count_ = std::min(
-                        finish_confirm_count_ + 1, finish_confirm_cycles_);
-                    last_finish_frontier_epoch_ = frontier_epoch;
-                }
-            }
-            else{
-                ResetFinishConfirmation();
-            }
-
-            const double stable_duration = finish_stable_since_ < 0.0 ? 0.0 :
-                now - finish_stable_since_;
-            if(finish_candidate && finish_confirm_count_ >= finish_confirm_cycles_ &&
-                stable_duration >= finish_stable_duration_){
-                ROS_WARN("Exploration finish confirmed after %d DTG updates and %.2fs "
-                    "(remaining gain %.2f)", finish_confirm_count_, stable_duration,
-                    remaining_gain);
-                return EdenPlanStatus::FINISHED;
-            }
-
-            ROS_WARN_THROTTLE(1.0, "Finish pending: active=%zu alive_vp=%zu pending_region=%d "
-                "gain=%.2f/%.2f sensor_age=%.2f stable=%d/%d,%.2f/%.2fs",
-                summary.active_eroi_num_, summary.alive_valid_vp_num_, no_pending_region ? 0 : 1,
-                remaining_gain, finish_total_gain_threshold_, sensor_age,
-                finish_confirm_count_, finish_confirm_cycles_, stable_duration,
-                finish_stable_duration_);
-            return EdenPlanStatus::RETRY_AFTER_UPDATE;
-        }
-        // Spectral timeout/instability/route rejection and ordinary path
-        // failures are all recoverable here.  Completion is only emitted by
-        // the guarded NO_ACTIVE_FRONTIER branch above.
-        ResetFinishConfirmation();
-        return EdenPlanStatus::GLOBAL_PLAN_FAILED;
-    }
-    ResetFinishConfirmation();
     
     cout<<"plan_res:"<<int(plan_res)<<endl;
     cout<<"ps_y:"<<ps_y.transpose()<<endl;
@@ -723,6 +323,7 @@ EdenPlanStatus SingleExp::EdenPlan(){
     // cout<<"y_norm:"<<y_norm<<endl;
     // cout<<"ydiff:"<<abs(EROI_.YawDiff(y_stem, y_main))<<endl;
     // cout<<"ydiff:"<<abs(EROI_.YawDiff(y_main, y_stem))<<endl;
+    // if(abs(EROI_.YawDiff(y_main, y_stem)) > M_PI * 0.5) getchar();
     // cout<<"tar_stem:"<<tar_stem.first<<"  "<<int(tar_stem.second)<<endl;
     // cout<<"tar_sub:"<<tar_sub.first<<"  "<<int(tar_sub.second)<<endl;
 
@@ -742,94 +343,93 @@ EdenPlanStatus SingleExp::EdenPlan(){
     //                     for(auto ps : path_stem){
     //                         cout<<"ps:"<<ps.transpose()<<"  fea:"<<LRM_.IsFeasible(ps)<<endl;
     //                     }
+    //                     getchar();
     //                 }
     //             }
     //         }
     //     }
     // }
-    if(plan_res != 2 && plan_res != 3){
-        ROS_WARN("[EDEN] target planner returned no executable target (plan_res=%u)",
-                 static_cast<unsigned int>(plan_res));
-        return EdenPlanStatus::TARGET_INVALID;
-    }
-
     plan_ts = ros::WallTime::now().toSec();
-    std::string validation_reason;
     if(plan_res == 2){
-        if(!ValidatePath(path_stem, false, validation_reason)){
-            ROS_ERROR_STREAM("[EDEN] rejected stem path: " << validation_reason);
-            return EdenPlanStatus::TARGET_INVALID;
-        }
+        // ROS_WARN("FindCorridors stem");
+        // cout<<"path_stem size:"<<path_stem.size()<<endl;
+        // for(auto ps : path_stem){
+        //     cout<<"ps:"<<ps.transpose()<<"  fea:"<<LRM_.IsFeasible(ps)<<endl;
+        // }
         int s = LRM_.FindCorridors(path_stem, toi.corridors_stem, toi.corridorVs_stem, pp, false, traj_length_);
-        if(s == 0 || pp.empty()){
-            ROS_ERROR("[EDEN] stem corridor construction failed");
-            return EdenPlanStatus::TRAJECTORY_FAILED;
+
+
+        if(pp.size() == 0){
+            ROS_ERROR("path_stem size == 0");
+            getchar();
         }
         toi.endState_stem.head(3) = LRM_.GetStdPos(pp.back());
         toi.endState_stem(3) = y_stem;
+
 
         if(s == 2){
             plan_res = 3;
         }
         else if(s == 1){
             ROS_WARN("FindCorridors main");
-            if(!ValidatePath(path_main, true, validation_reason) ||
-               LRM_.FindCorridors(path_main, toi.corridors_main,
-                                  toi.corridorVs_main, pp, true, INFINITY) != 1 ||
-               pp.empty()){
+            // cout<<"path_main size:"<<path_main.size()<<endl;
+            if(LRM_.FindCorridors(path_main, toi.corridors_main, toi.corridorVs_main, pp, true, INFINITY) != 1) {
                 plan_res = 3;
-                ROS_ERROR_STREAM("[EDEN] main corridor unavailable; falling back to "
-                                 "normal trajectory: " << validation_reason);
-            }
-            else{
-                toi.endState_main.head(3) =
-                    LRM_.GetStdPos(pp.back()) - Eigen::Vector3d::Ones() * 0.05;
-                toi.endState_main(3) = y_main;
+                cout<<"s:"<<s<<endl;
+                ROS_ERROR("path_main plan_res == 2");
+                getchar();
             }
 
-            if(plan_res == 2){
-                ROS_WARN("FindCorridors sub");
-                validation_reason.clear();
-                if(!ValidatePath(path_sub, false, validation_reason) ||
-                   LRM_.FindCorridors(path_sub, toi.corridors_sub,
-                                      toi.corridorVs_sub, pp, false,
-                                      traj_sub_length_) == 0 ||
-                   pp.empty()){
-                    plan_res = 3;
-                    ROS_ERROR_STREAM("[EDEN] sub corridor unavailable; falling back to "
-                                     "normal trajectory: " << validation_reason);
-                }
-                else{
-                    toi.endState_sub.head(3) =
-                        LRM_.GetStdPos(pp.back()) + Eigen::Vector3d::Ones() * 0.05;
-                    toi.endState_sub(3) = y_sub;
-                }
+            if(pp.size() == 0){
+                ROS_ERROR("path_main size == 0");
+                getchar();
             }
+            toi.endState_main.head(3) = LRM_.GetStdPos(pp.back()) - Eigen::Vector3d::Ones() * 0.05;;
+            toi.endState_main(3) = y_main;
+
+            ROS_WARN("FindCorridors sub");
+            // cout<<"path_sub size:"<<path_sub.size()<<endl;
+            // for(auto ps : path_sub){
+            //     cout<<"ps:"<<ps.transpose()<<endl;
+            // }
+            if(LRM_.FindCorridors(path_sub, toi.corridors_sub, toi.corridorVs_sub, pp, false, traj_sub_length_) == 0) {
+                plan_res = 3;
+                cout<<"s:"<<s<<endl;
+                ROS_ERROR("path_sub plan_res == 2");
+                getchar();
+            }
+            if(pp.size() == 0){
+                ROS_ERROR("path_sub size == 0");
+                getchar();
+            }
+            toi.endState_sub.head(3) = LRM_.GetStdPos(pp.back()) + Eigen::Vector3d::Ones() * 0.05;
+            toi.endState_sub(3) = y_sub;
         }
         else{
-            ROS_ERROR("[EDEN] unexpected stem corridor status");
-            return EdenPlanStatus::TRAJECTORY_FAILED;
+            ROS_ERROR("plan_res == 2, s == 0");
+            getchar();
         }
     }
 
     if(plan_res == 3){
         ROS_WARN("FindCorridors norm");
-        if(!ValidatePath(path_norm, false, validation_reason)){
-            ROS_ERROR_STREAM("[EDEN] rejected normal path: " << validation_reason);
-            return EdenPlanStatus::TARGET_INVALID;
-        }
         int s = LRM_.FindCorridors(path_norm, toi.corridors_norm, toi.corridorVs_norm, pp, false, traj_length_);
-        if(s == 0 || pp.empty()){
-            ROS_ERROR("[EDEN] normal corridor construction failed");
-            return EdenPlanStatus::TRAJECTORY_FAILED;
+
+        if(pp.size() == 0){
+            ROS_ERROR("path_norm size == 0");
+            getchar();
         }
         toi.endState_norm.head(3) = LRM_.GetStdPos(pp.back());
         toi.endState_norm(3) = y_norm;
 
-        if(s == 2){
+        if(s == 0){
+            cout<<"s:"<<s<<endl;
+            ROS_ERROR("path_norm plan_res == 2");
+            getchar();
+        }
+        else if(s == 2){
             if((pp.back().head(2)- path_norm.back().head(2)).norm() > 1e-3){
                 y_norm = atan2(path_norm.back()(1) - pp.back()(1), path_norm.back()(0) - pp.back()(0));
-                toi.endState_norm(3) = y_norm;
             }
         }
     }
@@ -837,61 +437,23 @@ EdenPlanStatus SingleExp::EdenPlan(){
 
     toi.camFov = camFov_;
     toi.camV = camV_;
-    if(!PopulateCorridorBounds(toi.corridorVs_main, toi.traj_bbxs_main,
-                               validation_reason) ||
-       !PopulateCorridorBounds(toi.corridorVs_sub, toi.traj_bbxs_sub,
-                               validation_reason) ||
-       !PopulateCorridorBounds(toi.corridorVs_stem, toi.traj_bbxs_stem,
-                               validation_reason) ||
-       !PopulateCorridorBounds(toi.corridorVs_norm, toi.traj_bbxs_norm,
-                               validation_reason)){
-        ROS_ERROR_STREAM("[EDEN] rejected invalid corridor bounds: "
-                         << validation_reason);
-        return EdenPlanStatus::TRAJECTORY_FAILED;
-    }
+    toi.traj_bbxs_main.resize(toi.corridors_main.size());
+    toi.traj_bbxs_sub.resize(toi.corridors_sub.size());
+    toi.traj_bbxs_stem.resize(toi.corridors_stem.size());
+    toi.traj_bbxs_norm.resize(toi.corridors_norm.size());
 
-    validation_reason.clear();
-    if(!ValidateTrajectoryInput(toi, plan_res, validation_reason)){
-        ROS_ERROR_STREAM("[EDEN] rejected trajectory optimizer input: "
-                         << validation_reason);
-        return EdenPlanStatus::TRAJECTORY_FAILED;
-    }
 
     if(plan_res == 2){
-        Eigen::Vector4d target_pose;
-        if(!EROI_.GetVp(static_cast<int>(tar_stem.first),
-                        static_cast<int>(tar_stem.second), target_pose) ||
-           !target_pose.allFinite()){
-            ROS_ERROR("[EDEN] branch target is invalid");
-            return EdenPlanStatus::TARGET_INVALID;
-        }
-        double dp = (ps - target_pose.head(3)).norm();
-        double dyaw = abs(EROI_.YawDiff(target_pose(3), ys));
-        if(!std::isfinite(dp) || !std::isfinite(dyaw)){
-            ROS_ERROR("[EDEN] branch target check produced NaN or Inf");
-            return EdenPlanStatus::TARGET_INVALID;
-        }
+        double dp = (ps - EROI_.EROI_[tar_stem.first].center_ - EROI_.vps_[tar_stem.second].head(3)).norm();
+        double dyaw = abs(EROI_.YawDiff(EROI_.vps_[tar_stem.second](3), ys));
         if((dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25) || !EROI_.StrongCheckViewpoint(tar_stem.first, tar_stem.second, true)){
             DTG_.RemoveVp(tar_stem.first, tar_stem.second);
             cout<<"too close branch!"<<endl;
-            return EdenPlanStatus::TARGET_INVALID;
+            return false;
         }
         plan_ts = ros::WallTime::now().toSec();
 
         if(TrajOpt_.AggressiveBranchTrajOptimize(toi)){
-            const Trajectory4<5> candidate = TrajOpt_.stem_traj_;
-            validation_reason.clear();
-            if(!ValidateTrajectory(candidate, validation_reason)){
-                ROS_ERROR_STREAM("[EDEN] rejected invalid branch trajectory: "
-                                 << validation_reason);
-                return EdenPlanStatus::TRAJECTORY_FAILED;
-            }
-            if(!ValidateTrajectory(TrajOpt_.main_traj_, validation_reason) ||
-               !ValidateTrajectory(TrajOpt_.sub_traj_, validation_reason)){
-                ROS_ERROR_STREAM("[EDEN] rejected invalid branch continuation: "
-                                 << validation_reason);
-                return EdenPlanStatus::TRAJECTORY_FAILED;
-            }
             traj_duration = ros::WallTime::now().toSec() - plan_ts;
             if(stat_){
                 CS_.SetVolume(target_duration, 3);
@@ -899,18 +461,12 @@ EdenPlanStatus SingleExp::EdenPlan(){
                 CS_.SetVolume(traj_duration, 5);
             }
 
-            exc_traj_ = candidate;
+            exc_traj_ = TrajOpt_.stem_traj_;
             run_branch_ = true;
             traj_start_t_ = hand_t;
             replan_t_ = min(replan_duration_, max(exc_traj_.getTotalDuration() - 0.15, 0.0)) + traj_start_t_;
             traj_end_t_ = exc_traj_.getTotalDuration() + traj_start_t_;
-            const bool early_replan =
-                !TrajOpt_.upboundVec_.empty() &&
-                std::isfinite(TrajOpt_.upboundVec_[0]) &&
-                TrajOpt_.upboundVec_[0] > 0.0 &&
-                TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() <
-                    TrajOpt_.upboundVec_[0] * 0.6;
-            if(early_replan){
+            if(TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() < TrajOpt_.upboundVec_[0] * 0.6){
                 traj_replan_t_ = traj_start_t_ + traj_replan_duration_;
             }
             else{
@@ -929,11 +485,7 @@ EdenPlanStatus SingleExp::EdenPlan(){
             // cout<<"replan_t_1:"<<replan_t_ - cur_t<<endl;
             // cout<<"eroi state:"<<int(EROI_.EROI_[target_f_id_].f_state_)<<"  vp state:"<<int(EROI_.EROI_[target_f_id_].local_vps_[target_v_id_])<<endl;
 
-            DTG_.RecordExecutedFrontier(tar_stem.first);
-            if(!PublishTraj()){
-                return EdenPlanStatus::TRAJECTORY_FAILED;
-            }
-            log_plan_timings();
+            PublishTraj();
             ShowTraj();
             ShowPathCorridor(path_stem, toi.corridors_stem);
 
@@ -964,61 +516,36 @@ EdenPlanStatus SingleExp::EdenPlan(){
 
             // if(EROI_.EROI_[target_f_id_].f_state_ != 1){
             //     cout<<"f:"<<target_f_id_<<"  vp:"<<int(target_v_id_)<<endl;
+            //     getchar();
             // }
-            return EdenPlanStatus::SUCCESS;
+            return true;
         }
         else{
-            return EdenPlanStatus::TRAJECTORY_FAILED;
+            return false;    
         }
     }
     else if(plan_res == 3){
-        Eigen::Vector4d target_pose;
-        if(!EROI_.GetVp(static_cast<int>(tar_norm.first),
-                        static_cast<int>(tar_norm.second), target_pose) ||
-           !target_pose.allFinite()){
-            ROS_ERROR("[EDEN] normal target is invalid");
-            return EdenPlanStatus::TARGET_INVALID;
-        }
-        double dp = (ps - target_pose.head(3)).norm();
-        double dyaw = abs(EROI_.YawDiff(target_pose(3), ys));
-        if(!std::isfinite(dp) || !std::isfinite(dyaw)){
-            ROS_ERROR("[EDEN] normal target check produced NaN or Inf");
-            return EdenPlanStatus::TARGET_INVALID;
-        }
+        double dp = (ps - EROI_.EROI_[tar_norm.first].center_ - EROI_.vps_[tar_norm.second].head(3)).norm();
+        double dyaw = abs(EROI_.YawDiff(EROI_.vps_[tar_norm.second](3), ys));
         if(!EROI_.StrongCheckViewpoint(tar_norm.first, tar_norm.second, true) || (dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25)){
             DTG_.RemoveVp(tar_norm.first, tar_norm.second);
             cout<<"too close norm!"<<endl;
-            return EdenPlanStatus::TARGET_INVALID;
+            return false;
         }
 
         plan_ts = ros::WallTime::now().toSec();
         if(TrajOpt_.NormTrajOptimize(toi)){
-            const Trajectory4<5> candidate = TrajOpt_.norm_traj_;
-            validation_reason.clear();
-            if(!ValidateTrajectory(candidate, validation_reason)){
-                ROS_ERROR_STREAM("[EDEN] rejected invalid normal trajectory: "
-                                 << validation_reason);
-                return EdenPlanStatus::TRAJECTORY_FAILED;
-            }
             traj_duration = ros::WallTime::now().toSec() - plan_ts;
             if(stat_){
                 CS_.SetVolume(target_duration, 3);
                 CS_.SetVolume(corridor_duration, 4);
                 CS_.SetVolume(traj_duration, 5);
             }
-            exc_traj_ = candidate;
+            exc_traj_ = TrajOpt_.norm_traj_;
             run_branch_ = false;
             traj_start_t_ = hand_t;
             replan_t_ = min(replan_duration_ * 2.5, max(exc_traj_.getTotalDuration() - 0.15, 0.0)) + traj_start_t_;
-            const bool early_replan =
-                TrajOpt_.main_traj_.getPieceNum() > 0 &&
-                !TrajOpt_.upboundVec_.empty() &&
-                std::isfinite(TrajOpt_.upboundVec_[0]) &&
-                TrajOpt_.upboundVec_[0] > 0.0 &&
-                TrajOpt_.main_traj_[0].getCoeffMat().allFinite() &&
-                TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() <
-                    TrajOpt_.upboundVec_[0] * 0.6;
-            if(early_replan){
+            if(TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() < TrajOpt_.upboundVec_[0] * 0.6){
                 traj_replan_t_ = traj_start_t_ + traj_replan_duration_;
             }
             else{
@@ -1034,23 +561,19 @@ EdenPlanStatus SingleExp::EdenPlan(){
             cout<<"duration:"<<exc_traj_.getTotalDuration()<<endl;
             cout<<"replan_t_2:"<<replan_t_ - cur_t<<endl;
             
-            DTG_.RecordExecutedFrontier(tar_norm.first);
-            if(!PublishTraj()){
-                return EdenPlanStatus::TRAJECTORY_FAILED;
-            }
-            log_plan_timings();
+            PublishTraj();
             ShowTraj();
             ShowPathCorridor(path_norm, toi.corridors_norm);
             cout<<"plan cost:"<<ros::WallTime::now().toSec() - cur_t<<endl;
 
-            return EdenPlanStatus::SUCCESS;
+            return true;
         }
         else{
-            return EdenPlanStatus::TRAJECTORY_FAILED;
+            return false;    
         }
     }
     else{
-        return EdenPlanStatus::TARGET_INVALID;
+        return false;    
     }
     
 }
@@ -1060,19 +583,6 @@ bool SingleExp::TrajReplan(){
     double ys, yds, ydds, ye, yde, ydde;
     double hand_t = max(ros::WallTime::now().toSec() + reach_out_t_ * 0.5, traj_start_t_); 
     double cur_t = ros::WallTime::now().toSec();
-    if(!std::isfinite(hand_t) || !std::isfinite(cur_t) ||
-       !std::isfinite(traj_start_t_) || !std::isfinite(traj_end_t_)){
-        ROS_ERROR("[EDEN] invalid absolute trajectory timing before replanning");
-        return false;
-    }
-    if(cur_t <= traj_end_t_){
-        std::string active_reason;
-        if(!ValidateTrajectory(exc_traj_, active_reason)){
-            ROS_ERROR_STREAM("[EDEN] cannot sample active trajectory for replanning: "
-                             << active_reason);
-            return false;
-        }
-    }
     if(hand_t > traj_end_t_){
         if(cur_t - traj_end_t_ > 0.0){
             hand_t = ros::WallTime::now().toSec();
@@ -1144,21 +654,10 @@ bool SingleExp::TrajReplan(){
         yde = 0; 
         ydde = 0;
     }
-    if(!ps.allFinite() || !vs.allFinite() || !as.allFinite() ||
-       !std::isfinite(ys) || !std::isfinite(yds) ||
-       !std::isfinite(ydds)){
-        ROS_ERROR("[EDEN] invalid initial state for trajectory replanning");
-        return false;
-    }
     EROI_.YawNorm(ys);
-    if(!std::isfinite(ys)){
-        ROS_ERROR("[EDEN] yaw normalization failed during trajectory replanning");
-        return false;
-    }
 
     TrajOptInput toi;
     vector<Eigen::Vector3d> path_stem_temp, path_main_temp, path_sub_temp, path_norm_temp, pp; 
-    std::string validation_reason;
     toi.initState.resize(4, 3);
     toi.initState.col(0).head(3) = ps;
     toi.initState(3, 0) = ys;
@@ -1168,31 +667,24 @@ bool SingleExp::TrajReplan(){
     toi.initState(3, 2) = ydds;
     if(traj_type_ == 1){
         pe = tar_stem_.head(3);
-        if(!pe.allFinite() || !LRM_.IsFeasible(pe)){
-            ROS_WARN("[EDEN] invalid branch terminal position for replanning");
-            return false;
+        if(!LRM_.IsFeasible(pe)) return false;
+        for(auto &p : path_sub_){
+            if(!LRM_.IsFeasible(p, true)){
+                ROS_WARN("sub path occ");
+                return false;
+            }
         }
-        if(!ValidatePath(path_sub_, false, validation_reason)){
-            ROS_WARN_STREAM("[EDEN] rejected replanning sub path: "
-                            << validation_reason);
-            return false;
-        }
-        if(!ValidatePath(path_main_, true, validation_reason)){
-            ROS_WARN_STREAM("[EDEN] rejected replanning main path: "
-                            << validation_reason);
-            return false;
+        for(auto &p : path_main_){
+            if(!LRM_.IsFeasible(p, true)){
+                ROS_WARN("main path occ");
+                return false;
+            }
         }
 
         LRM_.ClearTopo();
         double dist;
         if(!LRM_.GetPath(ps, pe, path_stem_temp, dist)) {
             ROS_WARN("stem path search failed");
-            return false;
-        }
-        if(!std::isfinite(dist) ||
-           !ValidatePath(path_stem_temp, false, validation_reason)){
-            ROS_WARN_STREAM("[EDEN] invalid replanning stem path: "
-                            << validation_reason);
             return false;
         }
 
@@ -1205,7 +697,7 @@ bool SingleExp::TrajReplan(){
 
         if(pp.size() == 0){
             ROS_ERROR("path_stem size == 0");
-            return false;
+            getchar();
         }
         // for(auto p : path_stem_temp){
         //     cout<<"pstem:"<<p.transpose()<<endl;
@@ -1221,7 +713,7 @@ bool SingleExp::TrajReplan(){
 
         if(pp.size() == 0){
             ROS_ERROR("path_main size == 0");
-            return false;
+            getchar();
         }
         toi.endState_main.head(3) = pp.back() - Eigen::Vector3d::Ones() * 0.05;;
         toi.endState_main(3) = tar_main_(3);
@@ -1238,55 +730,25 @@ bool SingleExp::TrajReplan(){
         }
         if(pp.size() == 0){
             ROS_ERROR("path_sub size == 0");
-            return false;
+            getchar();
         }
         toi.endState_sub.head(3) = pp.back() + Eigen::Vector3d::Ones() * 0.05;
         toi.endState_sub(3) = tar_sub_(3);
 
         toi.camFov = camFov_;
         toi.camV = camV_;
-        if(!PopulateCorridorBounds(toi.corridorVs_main, toi.traj_bbxs_main,
-                                   validation_reason) ||
-           !PopulateCorridorBounds(toi.corridorVs_sub, toi.traj_bbxs_sub,
-                                   validation_reason) ||
-           !PopulateCorridorBounds(toi.corridorVs_stem, toi.traj_bbxs_stem,
-                                   validation_reason) ||
-           !PopulateCorridorBounds(toi.corridorVs_norm, toi.traj_bbxs_norm,
-                                   validation_reason)){
-            ROS_ERROR_STREAM("[EDEN] rejected invalid replan corridor bounds: "
-                             << validation_reason);
-            return false;
-        }
-
-        validation_reason.clear();
-        if(!ValidateTrajectoryInput(toi, 2, validation_reason)){
-            ROS_ERROR_STREAM("[EDEN] rejected trajectory replan input: "
-                             << validation_reason);
-            return false;
-        }
+        toi.traj_bbxs_main.resize(toi.corridors_main.size());
+        toi.traj_bbxs_sub.resize(toi.corridors_sub.size());
+        toi.traj_bbxs_stem.resize(toi.corridors_stem.size());
+        toi.traj_bbxs_norm.resize(toi.corridors_norm.size());
 
         if(TrajOpt_.AggressiveBranchTrajOptimize(toi)){
-            const Trajectory4<5> candidate = TrajOpt_.stem_traj_;
-            validation_reason.clear();
-            if(!ValidateTrajectory(candidate, validation_reason) ||
-               !ValidateTrajectory(TrajOpt_.main_traj_, validation_reason) ||
-               !ValidateTrajectory(TrajOpt_.sub_traj_, validation_reason)){
-                ROS_ERROR_STREAM("[EDEN] rejected invalid replanned trajectory: "
-                                 << validation_reason);
-                return false;
-            }
-            exc_traj_ = candidate;
+            exc_traj_ = TrajOpt_.stem_traj_;
             run_branch_ = true;
             traj_start_t_ = hand_t;
             replan_t_ = min(replan_t_, min(replan_duration_, max(exc_traj_.getTotalDuration() - 0.15, 0.0)) + traj_start_t_);
             traj_end_t_ = exc_traj_.getTotalDuration() + traj_start_t_;
-            const bool early_replan =
-                !TrajOpt_.upboundVec_.empty() &&
-                std::isfinite(TrajOpt_.upboundVec_[0]) &&
-                TrajOpt_.upboundVec_[0] > 0.0 &&
-                TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() <
-                    TrajOpt_.upboundVec_[0] * 0.6;
-            if(early_replan){
+            if(TrajOpt_.main_traj_[0].getCoeffMat().col(4).head(3).norm() < TrajOpt_.upboundVec_[0] * 0.6){
                 traj_replan_t_ = traj_start_t_ + traj_replan_duration_;
             }
             else{
@@ -1301,12 +763,7 @@ bool SingleExp::TrajReplan(){
             // cout<<"replan_t_1:"<<replan_t_ - cur_t<<endl;
             // cout<<"eroi state:"<<int(EROI_.EROI_[target_f_id_].f_state_)<<"  vp state:"<<int(EROI_.EROI_[target_f_id_].local_vps_[target_v_id_])<<endl;
 
-            if(target_f_id_ >= 0){
-                DTG_.RecordExecutedFrontier(static_cast<uint32_t>(target_f_id_));
-            }
-            if(!PublishTraj()){
-                return false;
-            }
+            PublishTraj();
             ShowTraj();
             ShowPathCorridor(path_stem_temp, toi.corridors_stem);
 
@@ -1332,6 +789,11 @@ bool SingleExp::TrajReplan(){
             cout<<"d1:"<< (toi.endState_stem.head(3) - ps).norm()<<endl;
             cout<<"d2:"<< (toi.endState_main.head(3) - toi.endState_stem.head(3)).norm()<<endl;
             cout<<"plan cost:"<<ros::WallTime::now().toSec() - cur_t<<endl;
+            // getchar();
+            // if(EROI_.EROI_[target_f_id_].f_state_ != 1){
+            //     cout<<"f:"<<target_f_id_<<"  vp:"<<int(target_v_id_)<<endl;
+            //     getchar();
+            // }
             return true;
         }
         else{
@@ -1362,39 +824,26 @@ int SingleExp::ViewPointsCheck(const double &t){
 
     Eigen::Vector4d tar_pose;
     if(!EROI_.GetVp(target_f_id_, target_v_id_, tar_pose)) {
-        ROS_WARN_STREAM("[EDEN] cannot retrieve target viewpoint f="
-                        << target_f_id_ << " vp=" << target_v_id_);
-        return 1;
-    }
-    if(!tar_pose.allFinite() || !p_.allFinite() || !std::isfinite(yaw_)){
-        ROS_ERROR("[EDEN] invalid state in viewpoint check");
+        cout<<"cant get vp:"<<target_f_id_<<"  "<<target_v_id_<<endl;
+        cout<<"eroi state:"<<int(EROI_.EROI_[target_f_id_].f_state_)<<"  vp state:"<<int(EROI_.EROI_[target_f_id_].local_vps_[target_v_id_])<<endl;
         return 1;
     }
     double dp, dyaw;
     dyaw = abs(EROI_.YawDiff(yaw_, tar_pose(3)));
     dp = (tar_pose.head(3) - p_).norm();
-    if(!std::isfinite(dp) || !std::isfinite(dyaw)){
-        ROS_ERROR("[EDEN] non-finite viewpoint distance or yaw difference");
-        return 1;
-    }
     if((dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25) || !EROI_.StrongCheckViewpoint(target_f_id_, target_v_id_, true)){
         cout<<"too close:"<<(dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25)<<endl;
-        if(target_f_id_ >= 0 &&
-           static_cast<std::size_t>(target_f_id_) < EROI_.EROI_.size() &&
-           target_v_id_ >= 0 &&
-           static_cast<std::size_t>(target_v_id_) <
-               EROI_.EROI_[target_f_id_].local_vps_.size()){
+        if(target_f_id_ >= 0 && target_f_id_ < EROI_.EROI_.size() && 0 <= target_v_id_ && target_v_id_ < EROI_.EROI_[target_f_id_].local_vps_.size())
             DTG_.RemoveVp(target_f_id_, target_v_id_);
-        }
-        cout<<"erase vp:"<<target_f_id_<<"  "<<target_v_id_<<endl;
-        dtg_flag_ = false;
+            cout<<"erase vp:"<<target_f_id_<<"  "<<target_v_id_<<endl;
+            dtg_flag_ = false;
         return 1;
     }
 
     return 0;
 }
 
-DTGPlus::GlobalPlanStatus SingleExp::TargetPlanning(const Eigen::Vector4d &p, const Eigen::Vector4d &v,
+void SingleExp::TargetPlanning(const Eigen::Vector4d &p, const Eigen::Vector4d &v,
     uint8_t &plan_res, vector<Eigen::Vector3d> &path_stem, vector<Eigen::Vector3d> &path_main, 
     vector<Eigen::Vector3d> &path_sub, vector<Eigen::Vector3d> &path_norm, 
     pair<uint32_t, uint8_t> &tar_stem, pair<uint32_t, uint8_t> &tar_main, 
@@ -1406,13 +855,9 @@ DTGPlus::GlobalPlanStatus SingleExp::TargetPlanning(const Eigen::Vector4d &p, co
     vector<Eigen::Vector3d> path1;
     double d1;
     ros::WallTime t1 = ros::WallTime::now();
-    const auto global_status = DTG_.PlanGlobalRoute(ps, route_h, path1, d1);
-    if(global_status != DTGPlus::GlobalPlanStatus::SUCCESS){
+    if(!DTG_.TspApproxiPlan(ps, route_h, path1, d1)){
         plan_res = 1; // route failed
-        // Never terminate the process from a routing outcome.  The caller
-        // applies the guarded completion test; every other status, including
-        // spectral timeout/instability/rejection, remains recoverable.
-        return global_status;
+        return;
     }
    
     // local exp sequence
@@ -1420,21 +865,11 @@ DTGPlus::GlobalPlanStatus SingleExp::TargetPlanning(const Eigen::Vector4d &p, co
         plan_res, path_stem, path_main, path_sub, path_norm, 
         tar_stem, tar_main, tar_sub, tar_norm,
         y_stem, y_main, y_sub, y_norm);
-    return DTGPlus::GlobalPlanStatus::SUCCESS;
+    return;
 
 }
 
-bool SingleExp::PublishTraj(){
-    std::string reason;
-    if(!ValidateTrajectory(exc_traj_, reason)){
-        ROS_ERROR_STREAM("[EDEN] refusing to publish invalid trajectory: " << reason);
-        return false;
-    }
-    if(!std::isfinite(traj_start_t_)){
-        ROS_ERROR("[EDEN] refusing to publish trajectory with invalid start time");
-        return false;
-    }
-
+void SingleExp::PublishTraj(){
     swarm_exp_msgs::LocalTraj traj;
     traj.state = 2;
     traj.start_t = traj_start_t_;
@@ -1453,11 +888,6 @@ bool SingleExp::PublishTraj(){
         traj.t_p[i] = cur_p.getDuration();
         traj.t_yaw[i] = cur_p.getDuration();
         for(int j = 0; j < cM.cols(); j++){
-            if(!std::isfinite(cM(0, j)) || !std::isfinite(cM(1, j)) ||
-               !std::isfinite(cM(2, j)) || !std::isfinite(cM(3, j))){
-                ROS_ERROR("[EDEN] refusing to publish non-finite polynomial coefficients");
-                return false;
-            }
             traj.coef_p[j + i * 6].x = cM(0, j);
             traj.coef_p[j + i * 6].y = cM(1, j);
             traj.coef_p[j + i * 6].z = cM(2, j);
@@ -1466,7 +896,6 @@ bool SingleExp::PublishTraj(){
     }
 
     traj_pub_.publish(traj);
-    return true;
 }
 
 void SingleExp::ReloadMap(const ros::TimerEvent &e){
@@ -1583,9 +1012,7 @@ void SingleExp::ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
     const nav_msgs::OdometryConstPtr& odom){
     double tc = ros::WallTime::now().toSec();
 
-    if(!have_odom_) return;
-    last_sensor_update_t_ = tc;
-    if(tc - last_map_update_t_ < update_interval_) return;
+    if(tc - last_map_update_t_ < update_interval_ || !have_odom_) return;
     last_map_update_t_ = tc; 
     ros::WallTime t1 = ros::WallTime::now();
 
@@ -1632,69 +1059,39 @@ void SingleExp::ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
 
 void SingleExp::PCLOdomCallback(const sensor_msgs::PointCloud2ConstPtr& pcl,
     const nav_msgs::OdometryConstPtr& odom){
-    if(!have_odom_) return;
-    last_sensor_update_t_ = ros::WallTime::now().toSec();
+
 }
 
 void SingleExp::BodyOdomCallback(const nav_msgs::OdometryConstPtr& odom){
     Quaterniond qua;
+    robot_pose_.setZero();
+    if(have_odom_){
+        len_ += sqrt(pow(p_(0) - odom->pose.pose.position.x, 2) + pow(p_(1) - odom->pose.pose.position.y, 2) + pow(p_(2) - odom->pose.pose.position.z, 2));
+    }
+    else{
+        ts_ = ros::WallTime::now().toSec();
+    }
+    have_odom_ = true;
     qua.x() = odom->pose.pose.orientation.x;
     qua.y() = odom->pose.pose.orientation.y;
     qua.z() = odom->pose.pose.orientation.z;
     qua.w() = odom->pose.pose.orientation.w;
 
-    Eigen::Vector3d position(
-        odom->pose.pose.position.x,
-        odom->pose.pose.position.y,
-        odom->pose.pose.position.z);
-    Eigen::Vector3d body_velocity(
-        odom->twist.twist.linear.x,
-        odom->twist.twist.linear.y,
-        odom->twist.twist.linear.z);
-    Eigen::Vector3d angular_velocity(
-        odom->twist.twist.angular.x,
-        odom->twist.twist.angular.y,
-        odom->twist.twist.angular.z);
-    const double quaternion_norm = qua.norm();
-    if(!position.allFinite() || !body_velocity.allFinite() ||
-       !angular_velocity.allFinite() || !qua.coeffs().allFinite() ||
-       !std::isfinite(quaternion_norm) ||
-       quaternion_norm <= kMinTrajectoryDuration){
-        ROS_ERROR_THROTTLE(1.0, "[EDEN] rejected non-finite or invalid odometry");
-        return;
-    }
-
-    qua.normalize();
-    const Eigen::Matrix3d rotation = qua.toRotationMatrix();
-    const Eigen::Vector3d world_velocity = rotation * body_velocity;
-    const double next_yaw = atan2(rotation(1, 0), rotation(0, 0));
-    const double next_yaw_velocity =
-        angular_velocity.z() * rotation(2, 2) +
-        angular_velocity.y() * rotation(2, 1) +
-        angular_velocity.x() * rotation(2, 0);
-    if(!rotation.allFinite() || !world_velocity.allFinite() ||
-       !std::isfinite(next_yaw) || !std::isfinite(next_yaw_velocity)){
-        ROS_ERROR_THROTTLE(1.0, "[EDEN] rejected odometry with invalid derived state");
-        return;
-    }
-
-    if(have_odom_){
-        const double displacement = (p_ - position).norm();
-        if(std::isfinite(displacement)) len_ += displacement;
-    }
-    else{
-        ts_ = ros::WallTime::now().toSec();
-    }
-
-    robot_pose_.setZero();
-    have_odom_ = true;
-    p_ = position;
-    robot_pose_.block(0, 0, 3, 3) = rotation;
+    p_(0) = odom->pose.pose.position.x;
+    p_(1) = odom->pose.pose.position.y;
+    p_(2) = odom->pose.pose.position.z;
+    
+    robot_pose_.block(0, 0, 3, 3) = qua.toRotationMatrix();
     robot_pose_.block(0, 3, 3, 1) = p_;
 
-    v_ = world_velocity;
-    yaw_ = next_yaw;
-    yaw_v_ = next_yaw_velocity;
+    v_(0) = odom->twist.twist.linear.x;
+    v_(1) = odom->twist.twist.linear.y;
+    v_(2) = odom->twist.twist.linear.z;
+    // if(v_.norm() > 5.0) ROS_ERROR("large v!");//debug
+    v_ = qua.toRotationMatrix() * v_;
+    yaw_ = atan2(qua.matrix()(1, 0), qua.matrix()(0, 0));
+    yaw_v_ = odom->twist.twist.angular.z * robot_pose_(2, 2) + odom->twist.twist.angular.y * robot_pose_(2, 1)
+                + odom->twist.twist.angular.x * robot_pose_(2, 0);
 
     v_total_ += v_.norm();
     v_num_++;

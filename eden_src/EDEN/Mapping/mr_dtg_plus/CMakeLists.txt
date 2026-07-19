@@ -15,7 +15,6 @@ cs_add_library(${PROJECT_NAME}
   src/mr_dtg_plus.cpp
   src/mr_dtg_plus_global.cpp
   src/spectral_router.cpp
-  src/spectral_snapshot_builder.cpp
   src/spectral_v2_policy.cpp
   src/mr_dtg_plus_spectral.cpp
   src/mr_dtg_plus_path_search.cpp
@@ -34,14 +33,6 @@ if(CATKIN_ENABLE_TESTING)
       gtest_main)
   endif()
 
-  catkin_add_gtest(spectral_v2_policy_test
-    test/spectral_v2_policy_test.cpp)
-  if(TARGET spectral_v2_policy_test)
-    target_link_libraries(spectral_v2_policy_test
-      ${PROJECT_NAME}
-      gtest_main)
-  endif()
-
   catkin_add_gtest(spectral_snapshot_compression_test
     test/spectral_snapshot_compression_test.cpp)
   if(TARGET spectral_snapshot_compression_test)
@@ -54,14 +45,6 @@ if(CATKIN_ENABLE_TESTING)
     test/spectral_iterative_solver_test.cpp)
   if(TARGET spectral_iterative_solver_test)
     target_link_libraries(spectral_iterative_solver_test
-      ${PROJECT_NAME}
-      gtest_main)
-  endif()
-
-  catkin_add_gtest(spectral_snapshot_builder_test
-    test/spectral_snapshot_builder_test.cpp)
-  if(TARGET spectral_snapshot_builder_test)
-    target_link_libraries(spectral_snapshot_builder_test
       ${PROJECT_NAME}
       gtest_main)
   endif()

@@ -66,6 +66,7 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     nh_private.param(ns + "/MR_DTG/Spectral/RouteTerminalBias", spectral_exec_config_.route_terminal_bias, 0.25);
     nh_private.param(ns + "/MR_DTG/Spectral/SpectralViewWeight", spectral_exec_config_.spectral_view_weight, 0.0);
     nh_private.param(ns + "/MR_DTG/Spectral/CrossRegionWeight", spectral_exec_config_.cross_region_weight, 0.0);
+    nh_private.param(ns + "/MR_DTG/Spectral/TimeBudgetMs", spectral_exec_config_.spectral_time_budget_ms, 10.0);
     nh_private.param(ns + "/MR_DTG/Spectral/UpdatePeriod", spectral_exec_config_.update_period, 0.20);
 
     // Spectral-EDEN v2 parameters intentionally coexist with the original
@@ -73,10 +74,11 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     // loaded last and therefore take precedence when present.
     nh_private.param(ns + "/MR_DTG/SpectralV2/enabled", spectral_exec_config_.enabled,
         spectral_exec_config_.enabled);
+    nh_private.param(ns + "/MR_DTG/SpectralV2/async_solve", spectral_exec_config_.async_solve, true);
     nh_private.param(ns + "/MR_DTG/SpectralV2/corridor_compression",
         spectral_exec_config_.corridor_compression, true);
     nh_private.param(ns + "/MR_DTG/SpectralV2/min_spectral_nodes", min_spectral_nodes, 10);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/max_spectral_nodes", max_spectral_nodes, 60);
+    nh_private.param(ns + "/MR_DTG/SpectralV2/max_spectral_nodes", max_spectral_nodes, 80);
     nh_private.param(ns + "/MR_DTG/SpectralV2/dense_solver_max_nodes",
         dense_solver_max_nodes, 40);
     nh_private.param(ns + "/MR_DTG/SpectralV2/iterative_max_iterations",
@@ -87,23 +89,19 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
         spectral_config_.iterative_shift, 1.0e-4);
     nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_knn", spectral_exec_config_.spectral_knn, 5);
     nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_min_update_interval",
-        spectral_exec_config_.spectral_min_update_interval, 1.0);
+        spectral_exec_config_.spectral_min_update_interval, 0.5);
     nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_max_update_interval",
-        spectral_exec_config_.spectral_max_update_interval, 5.0);
+        spectral_exec_config_.spectral_max_update_interval, 3.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/dirty_node_changes",
         spectral_exec_config_.dirty_node_changes, 3);
     nh_private.param(ns + "/MR_DTG/SpectralV2/dirty_edge_changes",
         spectral_exec_config_.dirty_edge_changes, 5);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/main_thread_snapshot_budget_ms",
-        spectral_exec_config_.main_thread_snapshot_budget_ms, 3.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/worker_warning_budget_ms",
-        spectral_exec_config_.worker_warning_budget_ms, 20.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/over_budget_limit",
-        spectral_exec_config_.over_budget_limit, 3);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/cooldown_duration",
-        spectral_exec_config_.cooldown_duration, 10.0);
+    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_time_budget_ms",
+        spectral_exec_config_.spectral_time_budget_ms, 5.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/max_spectral_epoch_age",
         spectral_exec_config_.max_spectral_epoch_age, 2);
+    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_timeout_limit",
+        spectral_exec_config_.spectral_timeout_limit, 3);
 
     nh_private.param(ns + "/MR_DTG/SpectralV2/confidence_weight_ncut",
         spectral_exec_config_.confidence_weight_ncut, 0.30);
@@ -135,17 +133,11 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
         spectral_exec_config_.region_match_threshold, 0.50);
 
     nh_private.param(ns + "/MR_DTG/SpectralV2/max_route_regret",
-        spectral_exec_config_.max_route_regret, 0.0);
+        spectral_exec_config_.max_route_regret, 0.05);
     nh_private.param(ns + "/MR_DTG/SpectralV2/switch_penalty_base",
-        spectral_exec_config_.switch_penalty_base, 0.0);
+        spectral_exec_config_.switch_penalty_base, 2.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/revisit_penalty_weight",
-        spectral_exec_config_.revisit_penalty_weight, 0.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/spectral_first_target_top_k",
-        spectral_exec_config_.spectral_first_target_top_k, 1);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/first_target_max_regret",
-        spectral_exec_config_.first_target_max_regret, 0.02);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/first_target_switch_penalty_scale",
-        spectral_exec_config_.first_target_switch_penalty_scale, 0.10);
+        spectral_exec_config_.revisit_penalty_weight, 1.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/neighbor_override_distance",
         spectral_exec_config_.neighbor_override_distance, 2.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/neighbor_override_margin",
@@ -153,7 +145,7 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     nh_private.param(ns + "/MR_DTG/SpectralV2/lock_debt_decay",
         spectral_exec_config_.lock_debt_decay, 0.90);
     nh_private.param(ns + "/MR_DTG/SpectralV2/lock_debt_max",
-        spectral_exec_config_.lock_debt_max, 0.0);
+        spectral_exec_config_.lock_debt_max, 8.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/recovery_duration",
         spectral_exec_config_.recovery_duration, 5.0);
 
@@ -171,8 +163,6 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
         spectral_exec_config_.frontier_actual_gain_eps, 10);
     nh_private.param(ns + "/MR_DTG/SpectralV2/frontier_expected_gain_eps",
         spectral_exec_config_.frontier_expected_gain_eps, 1.0);
-    nh_private.param(ns + "/MR_DTG/SpectralV2/low_expected_gain_scale",
-        spectral_exec_config_.low_expected_gain_scale, 0.25);
     nh_private.param(ns + "/MR_DTG/SpectralV2/frontier_quarantine_time",
         spectral_exec_config_.frontier_quarantine_time, 5.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/region_done_confirm_cycles",
@@ -181,6 +171,17 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
         spectral_exec_config_.region_stall_window, 8.0);
     nh_private.param(ns + "/MR_DTG/SpectralV2/region_stall_timeout",
         spectral_exec_config_.region_stall_timeout, 12.0);
+    nh_private.param(ns + "/MR_DTG/SpectralV2/repeat_target_limit",
+        spectral_exec_config_.repeat_target_limit, 3);
+
+    // ── Spectral-EDEN V4: bounded skeleton + single-target fast path ──
+    nh_private.param(ns + "/MR_DTG/SpectralV41/enabled", spectral_v4_config_.enabled, false);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/log_diagnostics", spectral_v4_config_.log_diagnostics, true);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/skeleton_max_nodes", spectral_v4_config_.skeleton_max_nodes, 48);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/local_frontier_top_k", spectral_v4_config_.local_frontier_top_k, 8);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/target_switch_margin", spectral_v4_config_.target_switch_margin, 0.25);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/min_target_commit_sec", spectral_v4_config_.min_target_commit_sec, 1.0);
+    ROS_WARN("Spectral-EDEN V4 enabled=%d ns=%s", spectral_v4_config_.enabled ? 1 : 0, ns.c_str());
 
     spectral_exec_config_.graph_mode = spectral_graph_mode == 0
         ? SpectralGraphMode::ACTIVE_COMPLETE : SpectralGraphMode::SUPPORT_SPARSE;
@@ -216,8 +217,8 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     spectral_exec_config_.partition_grace_epochs = std::max(0, spectral_exec_config_.partition_grace_epochs);
     spectral_exec_config_.max_spectral_epoch_age = std::max(
         0, spectral_exec_config_.max_spectral_epoch_age);
-    spectral_exec_config_.over_budget_limit = std::max(
-        1, spectral_exec_config_.over_budget_limit);
+    spectral_exec_config_.spectral_timeout_limit = std::max(
+        1, spectral_exec_config_.spectral_timeout_limit);
     spectral_exec_config_.lambda2_ema_alpha = std::max(0.0,
         std::min(0.999, spectral_exec_config_.lambda2_ema_alpha));
     spectral_exec_config_.lambda2_ratio = std::max(0.0, spectral_exec_config_.lambda2_ratio);
@@ -228,12 +229,7 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     spectral_exec_config_.route_terminal_bias = std::max(0.0, spectral_exec_config_.route_terminal_bias);
     spectral_exec_config_.spectral_view_weight = std::max(0.0, spectral_exec_config_.spectral_view_weight);
     spectral_exec_config_.cross_region_weight = std::max(0.0, spectral_exec_config_.cross_region_weight);
-    spectral_exec_config_.main_thread_snapshot_budget_ms = std::max(
-        0.0, spectral_exec_config_.main_thread_snapshot_budget_ms);
-    spectral_exec_config_.worker_warning_budget_ms = std::max(
-        0.0, spectral_exec_config_.worker_warning_budget_ms);
-    spectral_exec_config_.cooldown_duration = std::max(
-        0.0, spectral_exec_config_.cooldown_duration);
+    spectral_exec_config_.spectral_time_budget_ms = std::max(0.0, spectral_exec_config_.spectral_time_budget_ms);
     spectral_exec_config_.update_period = std::max(0.0, spectral_exec_config_.update_period);
     spectral_exec_config_.spectral_min_update_interval = std::max(0.0,
         spectral_exec_config_.spectral_min_update_interval);
@@ -263,18 +259,10 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     spectral_exec_config_.lock_debt_max = std::max(0.0, spectral_exec_config_.lock_debt_max);
     spectral_exec_config_.recovery_duration = std::max(0.0,
         spectral_exec_config_.recovery_duration);
-    spectral_exec_config_.spectral_first_target_top_k = std::max(
-        1, spectral_exec_config_.spectral_first_target_top_k);
-    spectral_exec_config_.first_target_max_regret = std::max(
-        0.0, spectral_exec_config_.first_target_max_regret);
-    spectral_exec_config_.first_target_switch_penalty_scale = std::max(
-        0.0, spectral_exec_config_.first_target_switch_penalty_scale);
     spectral_exec_config_.frontier_quarantine_time = std::max(0.0,
         spectral_exec_config_.frontier_quarantine_time);
     spectral_exec_config_.frontier_expected_gain_eps = std::max(0.0,
         spectral_exec_config_.frontier_expected_gain_eps);
-    spectral_exec_config_.low_expected_gain_scale = Clamp01(
-        spectral_exec_config_.low_expected_gain_scale);
     spectral_exec_config_.region_stall_window = std::max(0.0,
         spectral_exec_config_.region_stall_window);
     spectral_exec_config_.region_stall_timeout = std::max(
@@ -334,7 +322,6 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     last_submitted_anchor_count_ = 0;
     last_raw_spectral_node_count_ = 0;
     last_compressed_spectral_node_count_ = 0;
-    last_spectral_stage_timings_ = SpectralStageTimings();
     spectral_mode_state_ = SpectralModeState();
     soft_route_selected_ = false;
     lock_debt_ = 0.0;
@@ -343,12 +330,7 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     recovery_requested_ = false;
     late_stage_active_ = false;
     no_cut_epochs_ = 0;
-    consecutive_main_snapshot_overruns_ = 0;
-    consecutive_worker_budget_overruns_ = 0;
-    spectral_cooldown_until_ = 0.0;
-    main_snapshot_overrun_count_ = 0;
-    worker_budget_overrun_count_ = 0;
-    spectral_cooldown_count_ = 0;
+    consecutive_spectral_timeouts_ = 0;
     spectral_mode_toggle_count_ = 0;
     recovery_count_ = 0;
     evaluated_spectral_routes_ = 0;

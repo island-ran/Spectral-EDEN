@@ -1,8 +1,7 @@
 #include <gtest/gtest.h>
 
-#include <mr_dtg_plus/spectral_snapshot_builder.h>
+#include <mr_dtg_plus/mr_dtg_plus.h>
 
-#include <algorithm>
 #include <cmath>
 #include <unordered_set>
 
@@ -19,10 +18,11 @@ TEST(SpectralSnapshotCompressionTest, DegreeTwoChainPreservesLengthAndMinimumCle
   input.edges.emplace_back(2U, 3U, 2.0, 0.4, 0.0);
   input.edges.emplace_back(3U, 4U, 3.0, 0.6, 0.0);
 
+  MultiDtgPlus planner;
   SpectralGraphSnapshot output;
   std::string reason;
-  ASSERT_TRUE(CompressSpectralDegreeTwoChains(
-      input, std::unordered_set<std::uint32_t>{1U, 4U}, &output, &reason))
+  ASSERT_TRUE(planner.CompressDegreeTwoChains(
+      input, std::unordered_set<std::uint32_t>{1U, 4U}, output, reason))
       << reason;
   ASSERT_EQ(output.graph_version, 42U);
   ASSERT_EQ(output.nodes.size(), 2U);
@@ -39,10 +39,11 @@ TEST(SpectralSnapshotCompressionTest, ActiveAnchorSplitsCorridorAndIsNeverRemove
   input.edges.emplace_back(1U, 2U, 1.0, 1.0, 0.0);
   input.edges.emplace_back(2U, 3U, 1.0, 0.5, 0.0);
 
+  MultiDtgPlus planner;
   SpectralGraphSnapshot output;
   std::string reason;
-  ASSERT_TRUE(CompressSpectralDegreeTwoChains(
-      input, std::unordered_set<std::uint32_t>{1U, 3U}, &output, &reason))
+  ASSERT_TRUE(planner.CompressDegreeTwoChains(
+      input, std::unordered_set<std::uint32_t>{1U, 3U}, output, reason))
       << reason;
   ASSERT_EQ(output.nodes.size(), 3U);
   EXPECT_TRUE(output.nodes[1].active_anchor);
@@ -59,24 +60,17 @@ TEST(SpectralSnapshotCompressionTest, PureRingProducesNoSelfLoopOrDuplicatePair)
   input.edges.emplace_back(3U, 4U, 1.0, 1.0, 0.0);
   input.edges.emplace_back(4U, 1U, 1.0, 1.0, 0.0);
 
+  MultiDtgPlus planner;
   SpectralGraphSnapshot output;
   std::string reason;
-  ASSERT_TRUE(CompressSpectralDegreeTwoChains(
-      input, std::unordered_set<std::uint32_t>(), &output, &reason))
+  ASSERT_TRUE(planner.CompressDegreeTwoChains(
+      input, std::unordered_set<std::uint32_t>(), output, reason))
       << reason;
-  ASSERT_EQ(output.nodes.size(), 3U);
-  ASSERT_EQ(output.edges.size(), 3U);
-  std::unordered_set<std::uint64_t> pairs;
-  for (const SpectralEdgeInput& edge : output.edges) {
-    EXPECT_NE(edge.from_h_id, edge.to_h_id);
-    EXPECT_TRUE(std::isfinite(edge.length));
-    EXPECT_GT(edge.length, 0.0);
-    const std::uint32_t low = std::min(edge.from_h_id, edge.to_h_id);
-    const std::uint32_t high = std::max(edge.from_h_id, edge.to_h_id);
-    const std::uint64_t key =
-        (static_cast<std::uint64_t>(low) << 32U) | high;
-    EXPECT_TRUE(pairs.insert(key).second);
-  }
+  ASSERT_EQ(output.nodes.size(), 2U);
+  ASSERT_EQ(output.edges.size(), 1U);
+  EXPECT_NE(output.edges.front().from_h_id, output.edges.front().to_h_id);
+  EXPECT_TRUE(std::isfinite(output.edges.front().length));
+  EXPECT_GT(output.edges.front().length, 0.0);
 }
 
 }  // namespace

@@ -116,6 +116,16 @@ enum class SpectralGraphMode{
     SUPPORT_SPARSE = 1
 };
 
+// ── Spectral-EDEN V4: toggle to skip V2/V3 preprocessing ──
+struct SpectralV4Config{
+    bool    enabled = false;
+    bool    log_diagnostics = true;
+    int     skeleton_max_nodes = 48;
+    int     local_frontier_top_k = 8;
+    double  target_switch_margin = 0.25;
+    double  min_target_commit_sec = 1.0;
+};
+
 /**
  * @brief Online execution policy around the pure spectral eigensolver.
  *

@@ -448,8 +448,6 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     GlobalPlanStatus status = CollectActiveBoundaryRegions(
         ps, context, true);
     if(status != GlobalPlanStatus::SUCCESS){
-        // Region completion is confirmed against distinct DTG update epochs,
-        // including the tail phase in which no active anchor remains.
         if(status == GlobalPlanStatus::NO_ACTIVE_FRONTIER && !regions_.empty()){
             UpdateRegionExecutionState(context);
             global_plan_diagnostics_.active_region_id = active_region_id_;
@@ -459,6 +457,7 @@ GlobalPlanStatus MultiDtgPlus::PlanGlobalRoute(const Eigen::Vector3d &ps,
     }
     global_plan_diagnostics_.active_anchor_count = context.active_hnodes.size();
 
+    // ── Original V2/V3 pipeline ──
     std::string spectral_reason;
     ConsumeSpectralResult(context, now, spectral_reason);
     ReassignFrontierOwners();

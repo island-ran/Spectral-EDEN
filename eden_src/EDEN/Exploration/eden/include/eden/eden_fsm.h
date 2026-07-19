@@ -21,8 +21,7 @@ private:
     SingleExp S_planner_;
     ros::Timer fsm_timer_;
     M_State state_;
-    double t0_, retry_backoff_, retry_backoff_initial_, retry_backoff_max_;
-    double finish_hold_interval_, last_finish_hold_t_;
+    double t0_;
 };
 inline void SingleExpFSM::ChangeState(const M_State &state){
     // ROS_WARN("FSM from %d to %d", state_, state);
@@ -58,3 +57,4 @@ inline void SingleExpFSM::ChangeState(const M_State &state){
 // #*++=+#                  #=+++#
 // #*+++#                   %*=++*#
 // #++=*%                   #%+=++#
+                            

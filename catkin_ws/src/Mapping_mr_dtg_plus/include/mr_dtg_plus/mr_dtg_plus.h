@@ -537,6 +537,7 @@ private:
     int next_region_id_;
     SpectralConfig spectral_config_;
     SpectralExecutionConfig spectral_exec_config_;
+    SpectralV4Config     spectral_v4_config_;
     SpectralRouter spectral_router_;
     SpectralResult last_spectral_result_;
     SpectralResult stable_spectral_result_;

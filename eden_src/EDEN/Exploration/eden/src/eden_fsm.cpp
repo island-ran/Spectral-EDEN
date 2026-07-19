@@ -6,19 +6,9 @@ void SingleExpFSM::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     debug_sub_ = nh_.subscribe("/debug_topic", 1, &SingleExpFSM::DebugSub, this);
     fsm_timer_ = nh.createTimer(ros::Duration(0.01), &SingleExpFSM::FSMCallback, this);
     S_planner_.init(nh, nh_private);
-    const std::string ns = ros::this_node::getName();
-    nh_private.param(ns + "/Exp/RetryBackoffInitial", retry_backoff_initial_, 0.10);
-    nh_private.param(ns + "/Exp/RetryBackoffMax", retry_backoff_max_, 1.00);
-    nh_private.param(ns + "/Exp/FinishHoldInterval", finish_hold_interval_, 1.00);
-    retry_backoff_initial_ = std::max(retry_backoff_initial_, 0.01);
-    retry_backoff_max_ = std::max(retry_backoff_max_, retry_backoff_initial_);
-    finish_hold_interval_ = std::max(finish_hold_interval_, 0.10);
-    retry_backoff_ = retry_backoff_initial_;
     exploring_ = false;
-    start_trigger_ = false;
     state_ = M_State::SLEEP;
     t0_ = ros::WallTime::now().toSec();
-    last_finish_hold_t_ = -std::numeric_limits<double>::infinity();
     force_sample_ = false;
 }
 
@@ -29,65 +19,48 @@ void SingleExpFSM::TriggerCallback(const std_msgs::EmptyConstPtr &msg){
 
 void SingleExpFSM::DebugSub(const std_msgs::Empty &msg){
     S_planner_.StopDebugFunc();
-    ROS_WARN("[EDEN] debug stop requested");
+    getchar();
 }
 
 void SingleExpFSM::FSMCallback(const ros::TimerEvent &e){
-    const double now = ros::WallTime::now().toSec();
+    bool exc_plan = false;
+    int ap = S_planner_.AllowPlan(ros::WallTime::now().toSec());
+    
+    if(ap == 0) exc_plan = true;                                                                           
+    else if(ap == 1) exc_plan = true;                  // satisfy plan interval   
+    else if(ap == 2) exc_plan = true;                   // infeasible position           
+    // else if(ap == 3 /*&& (state_ == M_State::EXCUTE || state_ == M_State::LOCALPLAN)*/) exc_plan = true; //only allow check viewpoints and check the traj feasibility
+    else if(ap == 3) {
+        // if(state_ == M_State::LOCALPLAN){
+        //     exc_plan = false;
+        //     S_planner_.ForceUpdateEroiDtg();
 
-    // FINISH is a hold state, not a terminal process state.  A new trigger
-    // starts a fresh confirmation window and resumes exploration.
-    if(state_ == M_State::FINISH){
-        if(exploring_ && start_trigger_){
-            start_trigger_ = false;
-            retry_backoff_ = retry_backoff_initial_;
-            S_planner_.ResetExplorationState();
-            ChangeState(M_State::LOCALPLAN);
-            S_planner_.SetPlanInterval(0.0);
-            return;
-        }
-        if(now - last_finish_hold_t_ >= finish_hold_interval_){
-            S_planner_.PublishHoldPosition();
-            last_finish_hold_t_ = now;
-        }
-        return;
+        // } 
+        // else{
+            exc_plan = true;
+        // }
     }
+    // else if(ap == 4 && state_ == M_State::LOCALPLAN) exc_plan = true;
+    else if(ap == 5) exc_plan = true;                   // traj time up
 
-    if(state_ == M_State::SLEEP){
-        if(!exploring_){
-            S_planner_.SetPlanInterval(0.1);
-            return;
-        }
-        start_trigger_ = false;
-        retry_backoff_ = retry_backoff_initial_;
-        S_planner_.ResetExplorationState();
-        ChangeState(M_State::LOCALPLAN);
-        S_planner_.SetPlanInterval(0.0);
-        return;
-    }
-
-    // A transition to LOCALPLAN, or a failed plan, requests exactly one
-    // forced EROI/DTG refresh.  Planning then waits for the current backoff;
-    // this prevents a 100 Hz retry/update loop.
     if(force_sample_){
         force_sample_ = false;
+        exc_plan = false;
         S_planner_.ForceUpdateEroiDtg();
-        S_planner_.SetPlanInterval(retry_backoff_);
+    }
+    // cout<<"ap:"<<ap<<endl;
+    // cout<<"state_:"<<int(state_)<<endl;
+
+    if(!exc_plan) {
+        if(state_ == M_State::LOCALPLAN){
+            cout<<"ap:"<<ap<<endl;
+            // ROS_WARN("not allow plan");
+            // cout<<"state_:"<<state_<<endl;
+            // cout<<"plan:"<<S_planner_.plan_t_ - t0_<<endl;
+            // cout<<"dt:"<<S_planner_.plan_t_ - ros::WallTime::now().toSec()<<endl;
+        }
         return;
     }
-
-    const int ap = S_planner_.AllowPlan(now);
-    if(ap == 1) return;  // plan interval has not elapsed
-    if(ap == 2 || ap == 3){
-        ROS_WARN_THROTTLE(1.0, "Planning deferred while pose/map is not ready (reason=%d)", ap);
-        if(state_ != M_State::LOCALPLAN) ChangeState(M_State::LOCALPLAN);
-        else force_sample_ = true;
-        retry_backoff_ = std::min(retry_backoff_max_,
-            std::max(retry_backoff_initial_, retry_backoff_ * 2.0));
-        S_planner_.SetPlanInterval(retry_backoff_);
-        return;
-    }
-
     switch (state_)
     {
         case M_State::EXCUTE :{
@@ -130,37 +103,28 @@ void SingleExpFSM::FSMCallback(const ros::TimerEvent &e){
             break;
         }
         case M_State::FINISH :{
-            // Handled before AllowPlan().
+            S_planner_.SetPlanInterval(0.009);
             break;
         }
         case M_State::LOCALPLAN :{
-            const EdenPlanStatus plan_status = S_planner_.EdenPlan();
-            if(plan_status == EdenPlanStatus::SUCCESS){
-                retry_backoff_ = retry_backoff_initial_;
+            if(ap == 2 || ap == 3){                                       
+                S_planner_.SetPlanInterval(0.009);
+                // ChangeState(M_State::LOCALPLAN);
+                break;
+            }
+
+            if(S_planner_.EdenPlan()){                 //plan success
                 S_planner_.SetPlanInterval(0.009);
                 ChangeState(M_State::EXCUTE);
                 break;
             }
-            if(plan_status == EdenPlanStatus::FINISHED){
-                exploring_ = false;
-                start_trigger_ = false;
-                S_planner_.PublishHoldPosition();
-                last_finish_hold_t_ = now;
-                S_planner_.SetPlanInterval(0.5);
-                ChangeState(M_State::FINISH);
+            else{
+                if(ap == 2)
+                    S_planner_.SetPlanInterval(0.009);
+                else
+                    S_planner_.SetPlanInterval(0.009);
                 break;
             }
-
-            // All non-completion outcomes are recoverable.  This includes
-            // spectral timeout/instability/route rejection (which normally
-            // already fall back inside MR-DTG), disconnected paths, invalid
-            // targets, and trajectory optimization failures.
-            force_sample_ = true;
-            retry_backoff_ = std::min(retry_backoff_max_,
-                std::max(retry_backoff_initial_, retry_backoff_ * 2.0));
-            S_planner_.SetPlanInterval(retry_backoff_);
-            ROS_WARN_THROTTLE(1.0, "Exploration plan deferred (status=%d), retry in %.2fs",
-                static_cast<int>(plan_status), retry_backoff_);
             break;
         }
         // case M_State::TRAJREPLAN :{
@@ -170,15 +134,16 @@ void SingleExpFSM::FSMCallback(const ros::TimerEvent &e){
         //     break;
         // }
         case M_State::SLEEP :{
-            // Handled before AllowPlan().
+            if(!exploring_){
+                if(start_trigger_)
+                    // S_planner_.Stay(S_planner_.init_pose_);
+                S_planner_.SetPlanInterval(0.009);
+            }
+            else{
+                ChangeState(M_State::LOCALPLAN);
+                S_planner_.SetPlanInterval(0.009);
+            }
             break;
         }
-        case M_State::RECOVER :{
-            ChangeState(M_State::LOCALPLAN);
-            S_planner_.SetPlanInterval(retry_backoff_);
-            break;
-        }
-        default:
-            break;
     }
 }

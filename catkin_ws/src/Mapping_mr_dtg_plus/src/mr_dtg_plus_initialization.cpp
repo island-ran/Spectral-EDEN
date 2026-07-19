@@ -174,6 +174,15 @@ void MultiDtgPlus::AlignInit(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     nh_private.param(ns + "/MR_DTG/SpectralV2/repeat_target_limit",
         spectral_exec_config_.repeat_target_limit, 3);
 
+    // ── Spectral-EDEN V4: bounded skeleton + single-target fast path ──
+    nh_private.param(ns + "/MR_DTG/SpectralV41/enabled", spectral_v4_config_.enabled, false);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/log_diagnostics", spectral_v4_config_.log_diagnostics, true);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/skeleton_max_nodes", spectral_v4_config_.skeleton_max_nodes, 48);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/local_frontier_top_k", spectral_v4_config_.local_frontier_top_k, 8);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/target_switch_margin", spectral_v4_config_.target_switch_margin, 0.25);
+    nh_private.param(ns + "/MR_DTG/SpectralV41/min_target_commit_sec", spectral_v4_config_.min_target_commit_sec, 1.0);
+    ROS_WARN("Spectral-EDEN V4 enabled=%d ns=%s", spectral_v4_config_.enabled ? 1 : 0, ns.c_str());
+
     spectral_exec_config_.graph_mode = spectral_graph_mode == 0
         ? SpectralGraphMode::ACTIVE_COMPLETE : SpectralGraphMode::SUPPORT_SPARSE;
     if(spectral_weight_mode <= 0){

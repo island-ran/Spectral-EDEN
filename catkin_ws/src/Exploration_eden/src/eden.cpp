@@ -35,17 +35,6 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
     // nh_private.param(ns + "/Exp/UseCoverTrajectory", use_cover_trajectory_, true);
     // nh_private.param(ns + "/Exp/VolumeTest", volume_test_, false);
     nh_private.param(ns + "/Exp/UpdateInterval", update_interval_, 0.2);
-    nh_private.param(ns + "/Exp/FinishConfirmCycles", finish_confirm_cycles_, 5);
-    nh_private.param(ns + "/Exp/FinishStableDuration", finish_stable_duration_, 2.0);
-    nh_private.param(ns + "/Exp/FinishTotalGainThreshold", finish_total_gain_threshold_, 10.0);
-    nh_private.param(ns + "/Exp/SensorFreshnessTimeout", sensor_freshness_timeout_, 1.0);
-    nh_private.param(ns + "/Exp/VolumeCoverageEnabled", volume_coverage_enabled_, false);
-    nh_private.param(ns + "/Exp/VolumeCoverageThreshold", volume_coverage_threshold_, 0.99);
-    nh_private.param(ns + "/Exp/TotalExplorableVolume", total_explorable_volume_, 0.0);
-    if(volume_coverage_enabled_ && !stat_){
-        ROS_WARN("VolumeCoverageEnabled requires Exp/statistic; volume coverage will not "
-            "be used for completion");
-    }
 
     // use_dir_corridor_ = use_dir_corridor_ & use_terminal_corridor_;
     // cout<<"=======------"<<use_dir_corridor_<<endl;
@@ -99,23 +88,12 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
 
     TrajOpt_.Init(nh, nh_private);
 
-    finish_confirm_cycles_ = std::max(finish_confirm_cycles_, 1);
-    finish_stable_duration_ = std::max(finish_stable_duration_, 0.0);
-    finish_total_gain_threshold_ = std::max(finish_total_gain_threshold_, 0.0);
-    sensor_freshness_timeout_ = std::max(sensor_freshness_timeout_, 0.0);
-
     last_map_update_t_ = ros::WallTime::now().toSec();
-    last_sensor_update_t_ = -std::numeric_limits<double>::infinity();
     traj_end_t_ = last_map_update_t_ - 0.1;
     have_odom_ = false;
     target_f_id_ = -1;
     target_v_id_ = -1;
     dtg_flag_ = false;
-    hold_position_valid_ = false;
-    finish_confirm_count_ = 0;
-    last_finish_frontier_epoch_ = 0;
-    finish_stable_since_ = -1.0;
-    last_global_plan_status_ = DTGPlus::GlobalPlanStatus::INTERNAL_ERROR;
     traj_start_t_ = last_map_update_t_ - 0.2;
     if(EROI_.sensor_type_ == SensorType::CAMERA){
         depth_sub_.reset(new message_filters::Subscriber<sensor_msgs::Image>(nh_, "/depth", 10));
@@ -146,61 +124,6 @@ void SingleExp::init(ros::NodeHandle &nh, ros::NodeHandle &nh_private){
 }
 void SingleExp::SetPlanInterval(const double &intv){
     plan_t_ = ros::WallTime::now().toSec() + intv;
-}
-
-void SingleExp::ResetFinishConfirmation(){
-    finish_confirm_count_ = 0;
-    finish_stable_since_ = -1.0;
-    last_finish_frontier_epoch_ = DTG_.frontier_epoch();
-}
-
-void SingleExp::ResetExplorationState(){
-    ResetFinishConfirmation();
-    last_global_plan_status_ = DTGPlus::GlobalPlanStatus::INTERNAL_ERROR;
-    target_f_id_ = -1;
-    target_v_id_ = -1;
-    dtg_flag_ = false;
-    hold_position_valid_ = false;
-}
-
-double SingleExp::ComputeRemainingInformationGain() const{
-    double total_gain = 0.0;
-    for(std::size_t f_id = 0; f_id < EROI_.EROI_.size(); ++f_id){
-        const auto &frontier = EROI_.EROI_[f_id];
-        if(frontier.f_state_ != 1) continue;
-
-        std::unordered_set<int> visited_viewpoints;
-        for(const auto raw_v_id : frontier.valid_vps_){
-            const int v_id = static_cast<int>(raw_v_id);
-            if(v_id < 0 || static_cast<std::size_t>(v_id) >= frontier.local_vps_.size()) continue;
-            if(frontier.local_vps_[v_id] != 1 || !visited_viewpoints.insert(v_id).second) continue;
-
-            const double gain = EROI_.GetGain(static_cast<int>(f_id), v_id);
-            if(std::isfinite(gain) && gain > 0.0) total_gain += gain;
-        }
-    }
-    return total_gain;
-}
-
-void SingleExp::PublishHoldPosition(){
-    if(!have_odom_) return;
-
-    if(!hold_position_valid_){
-        hold_position_ = p_;
-        hold_position_(2) += 1e-4;
-        hold_position_valid_ = true;
-    }
-
-    swarm_exp_msgs::LocalTraj hold;
-    hold.state = 1;
-    hold.start_t = ros::WallTime::now().toSec();
-    hold.recover_pt.x = hold_position_(0);
-    hold.recover_pt.y = hold_position_(1);
-    // The trajectory executor normalizes the displacement to recover_pt.  A
-    // tiny non-zero offset avoids normalizing an exact zero vector while still
-    // behaving as a position hold.
-    hold.recover_pt.z = hold_position_(2);
-    traj_pub_.publish(hold);
 }
 
 bool SingleExp::TrajCheck(){
@@ -252,10 +175,6 @@ int SingleExp::AllowPlan(const double &T){
         return 1;
     }
 
-    if(!have_odom_){
-        return 3;
-    }
-
     /* not in free space */
     if(!LRM_.IsFeasible(p_)){
         return 2;
@@ -276,7 +195,7 @@ int SingleExp::AllowPlan(const double &T){
 }
 
 
-EdenPlanStatus SingleExp::EdenPlan(){
+bool SingleExp::EdenPlan(){
     Eigen::Vector3d ps, vs, as, pe, ve, ae;
     double ys, yds, ydds, ye, yde, ydde;
     double hand_t = max(ros::WallTime::now().toSec() + reach_out_t_, traj_start_t_); 
@@ -383,82 +302,12 @@ EdenPlanStatus SingleExp::EdenPlan(){
 
     double target_duration, corridor_duration, traj_duration;
     double plan_ts = ros::WallTime::now().toSec();
-    last_global_plan_status_ = TargetPlanning(ps_y, vs_dy, plan_res,
+    TargetPlanning(ps_y, vs_dy, plan_res, 
         path_stem, path_main, path_sub, path_norm, 
         tar_stem, tar_main, tar_sub, tar_norm, 
         y_stem, y_main, y_sub, y_norm);
     target_duration = ros::WallTime::now().toSec() - plan_ts;
-
-    if(last_global_plan_status_ != DTGPlus::GlobalPlanStatus::SUCCESS){
-        if(last_global_plan_status_ == DTGPlus::GlobalPlanStatus::NO_ACTIVE_FRONTIER){
-            const auto summary = EROI_.GetExplorationSummary(false);
-            const double now = ros::WallTime::now().toSec();
-            const double remaining_gain = ComputeRemainingInformationGain();
-            const double sensor_age = now - last_sensor_update_t_;
-            const bool sensor_fresh = sensor_freshness_timeout_ <= 0.0 ||
-                (std::isfinite(last_sensor_update_t_) && sensor_age <= sensor_freshness_timeout_);
-            const bool no_effective_frontier = summary.alive_valid_vp_num_ == 0;
-            const bool no_pending_region = !DTG_.HasPendingRegions();
-            const bool low_total_gain = remaining_gain <= finish_total_gain_threshold_;
-            bool volume_covered = false;
-            if(volume_coverage_enabled_ && stat_ && total_explorable_volume_ > 0.0){
-                volume_covered = CS_.GetVolume(0) / total_explorable_volume_ >=
-                    volume_coverage_threshold_;
-            }
-            // volume_covered is a hard override: terminate regardless of gain/sensor
-            const bool finish_candidate = volume_covered ||
-                (sensor_fresh && low_total_gain &&
-                 (no_effective_frontier && no_pending_region));
-            const uint64_t frontier_epoch = DTG_.frontier_epoch();
-
-            if(finish_candidate){
-                if(finish_stable_since_ < 0.0) finish_stable_since_ = now;
-                if(frontier_epoch != last_finish_frontier_epoch_){
-                    finish_confirm_count_ = std::min(
-                        finish_confirm_count_ + 1, finish_confirm_cycles_);
-                    last_finish_frontier_epoch_ = frontier_epoch;
-                }
-            }
-            else{
-                ResetFinishConfirmation();
-            }
-
-            const double stable_duration = finish_stable_since_ < 0.0 ? 0.0 :
-                now - finish_stable_since_;
-            if(finish_candidate && finish_confirm_count_ >= finish_confirm_cycles_ &&
-                stable_duration >= finish_stable_duration_){
-                ROS_WARN("Exploration finish confirmed after %d DTG updates and %.2fs "
-                    "(remaining gain %.2f)", finish_confirm_count_, stable_duration,
-                    remaining_gain);
-                return EdenPlanStatus::FINISHED;
-            }
-
-            ROS_WARN_THROTTLE(1.0, "Finish pending: active=%zu alive_vp=%zu pending_region=%d "
-                "gain=%.2f/%.2f sensor_age=%.2f stable=%d/%d,%.2f/%.2fs",
-                summary.active_eroi_num_, summary.alive_valid_vp_num_, no_pending_region ? 0 : 1,
-                remaining_gain, finish_total_gain_threshold_, sensor_age,
-                finish_confirm_count_, finish_confirm_cycles_, stable_duration,
-                finish_stable_duration_);
-            return EdenPlanStatus::RETRY_AFTER_UPDATE;
-        }
-        // Spectral timeout/instability/route rejection and ordinary path
-        // failures are all recoverable here.  Completion is only emitted by
-        // the guarded NO_ACTIVE_FRONTIER branch above.
-        ResetFinishConfirmation();
-        return EdenPlanStatus::GLOBAL_PLAN_FAILED;
-    }
-    ResetFinishConfirmation();
-
-    // Hard override: terminate immediately when volume coverage reached
-    if(volume_coverage_enabled_ && stat_ && total_explorable_volume_ > 0.0){
-        if(CS_.GetVolume(0) / total_explorable_volume_ >= volume_coverage_threshold_){
-            ROS_WARN("Exploration complete - volume coverage reached (volume=%.1f/%.0f=%.1f%%)",
-                CS_.GetVolume(0), total_explorable_volume_,
-                CS_.GetVolume(0)/total_explorable_volume_*100.0);
-            ros::shutdown();
-        }
-    }
-
+    
     cout<<"plan_res:"<<int(plan_res)<<endl;
     cout<<"ps_y:"<<ps_y.transpose()<<endl;
     cout<<"p_:"<<p_.transpose()<<" "<<yaw_<<endl;
@@ -600,7 +449,7 @@ EdenPlanStatus SingleExp::EdenPlan(){
         if((dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25) || !EROI_.StrongCheckViewpoint(tar_stem.first, tar_stem.second, true)){
             DTG_.RemoveVp(tar_stem.first, tar_stem.second);
             cout<<"too close branch!"<<endl;
-            return EdenPlanStatus::TARGET_INVALID;
+            return false;
         }
         plan_ts = ros::WallTime::now().toSec();
 
@@ -669,10 +518,10 @@ EdenPlanStatus SingleExp::EdenPlan(){
             //     cout<<"f:"<<target_f_id_<<"  vp:"<<int(target_v_id_)<<endl;
             //     getchar();
             // }
-            return EdenPlanStatus::SUCCESS;
+            return true;
         }
         else{
-            return EdenPlanStatus::TRAJECTORY_FAILED;
+            return false;    
         }
     }
     else if(plan_res == 3){
@@ -681,7 +530,7 @@ EdenPlanStatus SingleExp::EdenPlan(){
         if(!EROI_.StrongCheckViewpoint(tar_norm.first, tar_norm.second, true) || (dp < LRM_.node_scale_.norm() * 1.0 && dyaw < 0.25)){
             DTG_.RemoveVp(tar_norm.first, tar_norm.second);
             cout<<"too close norm!"<<endl;
-            return EdenPlanStatus::TARGET_INVALID;
+            return false;
         }
 
         plan_ts = ros::WallTime::now().toSec();
@@ -717,14 +566,14 @@ EdenPlanStatus SingleExp::EdenPlan(){
             ShowPathCorridor(path_norm, toi.corridors_norm);
             cout<<"plan cost:"<<ros::WallTime::now().toSec() - cur_t<<endl;
 
-            return EdenPlanStatus::SUCCESS;
+            return true;
         }
         else{
-            return EdenPlanStatus::TRAJECTORY_FAILED;
+            return false;    
         }
     }
     else{
-        return EdenPlanStatus::TARGET_INVALID;
+        return false;    
     }
     
 }
@@ -994,7 +843,7 @@ int SingleExp::ViewPointsCheck(const double &t){
     return 0;
 }
 
-DTGPlus::GlobalPlanStatus SingleExp::TargetPlanning(const Eigen::Vector4d &p, const Eigen::Vector4d &v,
+void SingleExp::TargetPlanning(const Eigen::Vector4d &p, const Eigen::Vector4d &v,
     uint8_t &plan_res, vector<Eigen::Vector3d> &path_stem, vector<Eigen::Vector3d> &path_main, 
     vector<Eigen::Vector3d> &path_sub, vector<Eigen::Vector3d> &path_norm, 
     pair<uint32_t, uint8_t> &tar_stem, pair<uint32_t, uint8_t> &tar_main, 
@@ -1006,13 +855,9 @@ DTGPlus::GlobalPlanStatus SingleExp::TargetPlanning(const Eigen::Vector4d &p, co
     vector<Eigen::Vector3d> path1;
     double d1;
     ros::WallTime t1 = ros::WallTime::now();
-    const auto global_status = DTG_.PlanGlobalRoute(ps, route_h, path1, d1);
-    if(global_status != DTGPlus::GlobalPlanStatus::SUCCESS){
+    if(!DTG_.TspApproxiPlan(ps, route_h, path1, d1)){
         plan_res = 1; // route failed
-        // Never terminate the process from a routing outcome.  The caller
-        // applies the guarded completion test; every other status, including
-        // spectral timeout/instability/rejection, remains recoverable.
-        return global_status;
+        return;
     }
    
     // local exp sequence
@@ -1020,7 +865,7 @@ DTGPlus::GlobalPlanStatus SingleExp::TargetPlanning(const Eigen::Vector4d &p, co
         plan_res, path_stem, path_main, path_sub, path_norm, 
         tar_stem, tar_main, tar_sub, tar_norm,
         y_stem, y_main, y_sub, y_norm);
-    return DTGPlus::GlobalPlanStatus::SUCCESS;
+    return;
 
 }
 
@@ -1167,9 +1012,7 @@ void SingleExp::ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
     const nav_msgs::OdometryConstPtr& odom){
     double tc = ros::WallTime::now().toSec();
 
-    if(!have_odom_) return;
-    last_sensor_update_t_ = tc;
-    if(tc - last_map_update_t_ < update_interval_) return;
+    if(tc - last_map_update_t_ < update_interval_ || !have_odom_) return;
     last_map_update_t_ = tc; 
     ros::WallTime t1 = ros::WallTime::now();
 
@@ -1216,8 +1059,7 @@ void SingleExp::ImgOdomCallback(const sensor_msgs::ImageConstPtr& img,
 
 void SingleExp::PCLOdomCallback(const sensor_msgs::PointCloud2ConstPtr& pcl,
     const nav_msgs::OdometryConstPtr& odom){
-    if(!have_odom_) return;
-    last_sensor_update_t_ = ros::WallTime::now().toSec();
+
 }
 
 void SingleExp::BodyOdomCallback(const nav_msgs::OdometryConstPtr& odom){

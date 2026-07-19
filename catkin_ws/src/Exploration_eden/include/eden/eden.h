@@ -3,13 +3,9 @@
 
 #include <ros/ros.h>
 #include <thread>
-#include <algorithm>
-#include <cmath>
-#include <limits>
 #include <Eigen/Eigen>
 #include <vector>
 #include <list>
-#include <unordered_set>
 #include <tr1/unordered_map>
 #include <fstream>
 #include <unistd.h>
@@ -36,15 +32,6 @@
 #include <message_filters/sync_policies/exact_time.h>
 #include <message_filters/time_synchronizer.h>
 
-enum class EdenPlanStatus{
-    SUCCESS = 0,
-    FINISHED,
-    RETRY_AFTER_UPDATE,
-    GLOBAL_PLAN_FAILED,
-    TARGET_INVALID,
-    TRAJECTORY_FAILED
-};
-
 class SingleExp{
 typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, nav_msgs::Odometry>
     SyncPolicyImageOdom;
@@ -60,15 +47,13 @@ public:
     void SetPlanInterval(const double &intv);
     bool TrajCheck();
     int AllowPlan(const double &T);
-    EdenPlanStatus EdenPlan();
+    bool EdenPlan();
     bool TrajReplan();
     bool AllowReplan(){return ros::WallTime::now().toSec() > traj_replan_t_ && ros::WallTime::now().toSec() + 0.2 < traj_end_t_;};
     bool GoHome();
     bool FindShorterPath();
     int ViewPointsCheck(const double &t);
     void ForceUpdateEroiDtg();
-    void PublishHoldPosition();
-    void ResetExplorationState();
     void StopDebugFunc();
 
     double plan_t_;
@@ -96,15 +81,13 @@ private:
     void UpdateDTG(const ros::TimerEvent &e);
     void DataStatistic(const ros::TimerEvent &e);
 
-    DTGPlus::GlobalPlanStatus TargetPlanning(const Eigen::Vector4d &p, const Eigen::Vector4d &v,
+    void TargetPlanning(const Eigen::Vector4d &p, const Eigen::Vector4d &v,
                         uint8_t &plan_res, vector<Eigen::Vector3d> &path_stem, vector<Eigen::Vector3d> &path_main, 
                         vector<Eigen::Vector3d> &path_sub, vector<Eigen::Vector3d> &path_norm, 
                         pair<uint32_t, uint8_t> &tar_stem, pair<uint32_t, uint8_t> &tar_main, 
                         pair<uint32_t, uint8_t> &tar_sub, pair<uint32_t, uint8_t> &tar_norm, 
                         double &y_stem, double &y_main, double &y_sub, double &y_norm);
     void PublishTraj();
-    double ComputeRemainingInformationGain() const;
-    void ResetFinishConfirmation();
     void ShowTraj();
     void ShowPathCorridor(vector<Eigen::Vector3d> &path, vector<Eigen::MatrixX4d> &h);
     void Debug(vector<Eigen::Vector3d> &pts);
@@ -142,22 +125,14 @@ private:
     Eigen::Vector4d tar_norm_, tar_stem_, tar_main_, tar_sub_;
     int traj_type_; // 1: branch, 2: norm
     Eigen::Vector3d p_, v_;
-    Eigen::Vector3d hold_position_;
     double yaw_, yaw_v_;
     Eigen::Matrix4d robot_pose_;
     int v_num_;
     double v_total_, len_, ts_;
 
 
-    bool dtg_flag_, have_odom_, hold_position_valid_;
-    double last_map_update_t_, last_sensor_update_t_, update_interval_;
-    int finish_confirm_count_, finish_confirm_cycles_;
-    uint64_t last_finish_frontier_epoch_;
-    double finish_stable_since_, finish_stable_duration_;
-    double finish_total_gain_threshold_, sensor_freshness_timeout_;
-    DTGPlus::GlobalPlanStatus last_global_plan_status_;
-    bool volume_coverage_enabled_;
-    double volume_coverage_threshold_, total_explorable_volume_;
+    bool dtg_flag_, have_odom_;
+    double last_map_update_t_, update_interval_;
 };
 #endif
 
@@ -187,3 +162,4 @@ private:
 // #*++=+#                  #=+++#
 // #*+++#                   %*=++*#
 // #++=*%                   #%+=++#
+                            

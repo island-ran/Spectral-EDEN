@@ -23,8 +23,8 @@ SpectralGraphSnapshot MakeLargeIrregularChain(std::uint32_t node_count) {
 }
 
 TEST(SpectralIterativeSolverTest,
-     FortyOneToEightyNodesUsesSparseSolverAndMatchesDenseSpectrum) {
-  const SpectralGraphSnapshot snapshot = MakeLargeIrregularChain(48U);
+     AboveDenseRefreshLimitUsesSparseSolverAndMatchesDenseSpectrum) {
+  const SpectralGraphSnapshot snapshot = MakeLargeIrregularChain(49U);
 
   SpectralConfig dense_config;
   dense_config.max_spectral_nodes = 80U;
@@ -57,29 +57,36 @@ TEST(SpectralIterativeSolverTest,
             iterative_config.max_residual_norm);
 }
 
-TEST(SpectralIterativeSolverTest, SolverSelectionHonorsFortyAndDefaultSixtyLimits) {
+TEST(SpectralIterativeSolverTest,
+     SolverSelectionHonorsV41DefaultFortyEightAndSixtyFourLimits) {
   const SpectralRouter router;
 
-  const SpectralResult forty = router.Solve(MakeLargeIrregularChain(40U));
-  ASSERT_TRUE(forty.success()) << forty.diagnostics.reason;
-  EXPECT_EQ(forty.diagnostics.solver_type,
+  const SpectralResult forty_eight =
+      router.Solve(MakeLargeIrregularChain(48U));
+  ASSERT_TRUE(forty_eight.success())
+      << forty_eight.diagnostics.reason;
+  EXPECT_EQ(forty_eight.diagnostics.solver_type,
             SpectralSolverType::DENSE_SELF_ADJOINT);
 
-  const SpectralResult forty_one =
-      router.Solve(MakeLargeIrregularChain(41U));
-  ASSERT_TRUE(forty_one.success()) << forty_one.diagnostics.reason;
-  EXPECT_EQ(forty_one.diagnostics.solver_type,
+  const SpectralResult forty_nine =
+      router.Solve(MakeLargeIrregularChain(49U));
+  ASSERT_TRUE(forty_nine.success())
+      << forty_nine.diagnostics.reason;
+  EXPECT_EQ(forty_nine.diagnostics.solver_type,
             SpectralSolverType::SPARSE_BLOCK_INVERSE_ITERATION);
 
-  const SpectralResult sixty = router.Solve(MakeLargeIrregularChain(60U));
-  ASSERT_TRUE(sixty.success()) << sixty.diagnostics.reason;
-  EXPECT_EQ(sixty.diagnostics.solver_type,
+  const SpectralResult sixty_four =
+      router.Solve(MakeLargeIrregularChain(64U));
+  ASSERT_TRUE(sixty_four.success())
+      << sixty_four.diagnostics.reason;
+  EXPECT_EQ(sixty_four.diagnostics.solver_type,
             SpectralSolverType::SPARSE_BLOCK_INVERSE_ITERATION);
 
-  const SpectralResult sixty_one =
-      router.Solve(MakeLargeIrregularChain(61U));
-  EXPECT_EQ(sixty_one.status, SpectralSolveStatus::TOO_MANY_NODES);
-  EXPECT_EQ(sixty_one.diagnostics.solver_type, SpectralSolverType::NONE);
+  const SpectralResult sixty_five =
+      router.Solve(MakeLargeIrregularChain(65U));
+  EXPECT_EQ(sixty_five.status, SpectralSolveStatus::TOO_MANY_NODES);
+  EXPECT_EQ(sixty_five.diagnostics.solver_type,
+            SpectralSolverType::NONE);
 }
 
 TEST(SpectralIterativeSolverTest, PreviousFiedlerSeedsIterativeSubspace) {
@@ -87,6 +94,8 @@ TEST(SpectralIterativeSolverTest, PreviousFiedlerSeedsIterativeSubspace) {
   config.dense_solver_max_nodes = 40U;
   config.max_spectral_nodes = 80U;
   config.iterative_max_iterations = 150U;
+  config.iterative_tolerance = 1.0e-11;
+  config.max_residual_norm = 1.0e-8;
   const SpectralRouter router(config);
   const SpectralGraphSnapshot snapshot = MakeLargeIrregularChain(48U);
 

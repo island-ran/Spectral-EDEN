@@ -13,14 +13,14 @@ map_config:
     map_min_z: -1.0
     map_max_x: 130.0
     map_max_y: 75.0
-    map_max_z: 5.0
+    map_max_z: 3.8
 
     box_min_x: -2.0
     box_min_y: -30.0
     box_min_z: 0.0
     box_max_x: 128.0
     box_max_y: 71.0
-    box_max_z: 3.5
+    box_max_z: 3.4
 
     vbox_min_x: -3.0
     vbox_min_y: -32.0

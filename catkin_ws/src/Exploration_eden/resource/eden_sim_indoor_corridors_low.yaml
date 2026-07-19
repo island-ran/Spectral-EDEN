@@ -48,7 +48,7 @@ block_map/minY: -500.5
 block_map/minZ: -0.2
 block_map/maxX: 500.5
 block_map/maxY: 500.5
-block_map/maxZ: 3.5
+block_map/maxZ: 3.8
 
 block_map/blockX: 27
 block_map/blockY: 27
@@ -83,7 +83,7 @@ Exp/minY: -30.0
 Exp/minZ: 0.0
 Exp/maxX: 128.0
 Exp/maxY: 71.0
-Exp/maxZ: 3.5
+Exp/maxZ: 3.4
 
 Exp/robot_sizeX: 0.48
 Exp/robot_sizeY: 0.48
@@ -121,7 +121,6 @@ MR_DTG/H_thresh: 7.0
 MR_DTG/show_edge_details: true
 MR_DTG/PlanDebug: false
 MR_DTG/YawGain: 1.75
-MR_DTG/MaintainHdists: true
 
 MotionQ/VelNum: 3
 MotionQ/VelNum: 3
@@ -196,10 +195,5 @@ Computation/vdata_name4: corridor_plan
 Computation/vdata_name5: traj_plan
 Computation/vdata_name6: mem
 
-MR_DTG/Spectral/Enable: false
-MR_DTG/Spectral/FallbackToEOHDT: true
-MR_DTG/Spectral/LogDiagnostics: true
-
-# Spectral-EDEN v2: soft regional preference with an immutable EOHDT baseline.
-
-
+# Explicit non-spectral baseline for V4.1 comparison.
+MR_DTG/SpectralV41/enabled: false
